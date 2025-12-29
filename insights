@@ -1,16 +1,8 @@
-/* ===================== insight (WHATSAPP) — MESTRE + GA4 ===================== */
-/*
-  Requisitos:
-  - Aba: MESTRE
-  - Cabeçalho na linha 1 (nomes exatamente como você descreveu)
-  - Dados a partir da linha 2
-  - (Opcional) Script Properties:
-      GA4_PROPERTY_ID = 123456789  (apenas números)
-*/
+/**
+ * Insights.gs
+ * Gerador de resumos para WhatsApp.
+ */
 
-
-
-/* -------- PRESSETS -------- */
 function insight_hojeVsOntem(){
   const hoje = insight_startOfDay_(new Date());
   const ontem = insight_addDays_(hoje, -1);
@@ -24,883 +16,140 @@ function insight_ultimos30Dias(){ insight_gerarPresetSemHoje_(30); }
 
 function insight_gerarPresetSemHoje_(dias){
   const hoje = insight_startOfDay_(new Date());
-  const fimAtual = insight_addDays_(hoje, -1);                 // ontem
-  const iniAtual = insight_addDays_(fimAtual, -(dias - 1));    // janela atual
+  const fimAtual = insight_addDays_(hoje, -1);
+  const iniAtual = insight_addDays_(fimAtual, -(dias - 1));
   const fimAnt = insight_addDays_(iniAtual, -1);
   const iniAnt = insight_addDays_(fimAnt, -(dias - 1));
   insight_gerarComparativo_(iniAtual, fimAtual, iniAnt, fimAnt);
 }
 
-/* -------- PERÍODO MANUAL -------- */
 function insight_periodoManual(){
   const ui = SpreadsheetApp.getUi();
-  const resp = ui.prompt(
-    'período manual',
-    'digite no formato: dd/mm/aaaa a dd/mm/aaaa\nexemplo: 12/12/2025 a 18/12/2025',
-    ui.ButtonSet.OK_CANCEL
-  );
+  const resp = ui.prompt('Período manual', 'Formato: dd/mm/aaaa a dd/mm/aaaa', ui.ButtonSet.OK_CANCEL);
   if(resp.getSelectedButton() !== ui.Button.OK) return;
-
-  const txt = (resp.getResponseText() || '').trim();
-  const parts = txt.split(/\s+a\s+/i);
-  if(parts.length !== 2){
-    ui.alert('formato inválido. use: dd/mm/aaaa a dd/mm/aaaa');
-    return;
-  }
-
-  const iniAtual = insight_parseBRDate_(parts[0].trim());
-  const fimAtual = insight_parseBRDate_(parts[1].trim());
-  if(!iniAtual || !fimAtual){
-    ui.alert('datas inválidas. confira dia/mês/ano.');
-    return;
-  }
-  if(iniAtual > fimAtual){
-    ui.alert('a data inicial não pode ser maior que a final.');
-    return;
-  }
-
-  // compara com janela anterior do mesmo tamanho
-  const dias = insight_daysDiffInclusive_(iniAtual, fimAtual);
-  const fimAnt = insight_addDays_(iniAtual, -1);
+  const parts = resp.getResponseText().split(/\s+a\s+/i);
+  if(parts.length !== 2) return ui.alert('Formato inválido.');
+  const ini = insight_parseBRDate_(parts[0]);
+  const fim = insight_parseBRDate_(parts[1]);
+  if(!ini || !fim) return ui.alert('Datas inválidas.');
+  
+  const dias = Math.floor((fim - ini)/86400000) + 1;
+  const fimAnt = insight_addDays_(ini, -1);
   const iniAnt = insight_addDays_(fimAnt, -(dias - 1));
-
-  insight_gerarComparativo_(insight_startOfDay_(iniAtual), insight_startOfDay_(fimAtual),
-                            insight_startOfDay_(iniAnt), insight_startOfDay_(fimAnt));
+  insight_gerarComparativo_(ini, fim, iniAnt, fimAnt);
 }
 
-/* -------- GATILHO SEMANAL (SEGUNDA 06:45) -------- */
+// === GATILHOS ===
 function insight_instalarGatilhoSemanal(){
-  // remove duplicados antes
   insight_removerGatilhoSemanal();
-
-  ScriptApp.newTrigger('insight_rodarSemanalAuto')
-    .timeBased()
-    .everyWeeks(1)
-    .onWeekDay(ScriptApp.WeekDay.MONDAY)
-    .atHour(6)
-    .nearMinute(45)
-    .create();
-
-  SpreadsheetApp.getUi().alert('gatilho semanal instalado: segunda-feira 06:45');
+  ScriptApp.newTrigger('insight_rodarSemanalAuto').timeBased().everyWeeks(1).onWeekDay(ScriptApp.WeekDay.MONDAY).atHour(6).nearMinute(45).create();
+  SpreadsheetApp.getUi().alert('Gatilho semanal instalado.');
 }
 
 function insight_removerGatilhoSemanal(){
-  const triggers = ScriptApp.getProjectTriggers();
-  let removed = 0;
-  triggers.forEach(t => {
-    if(t.getHandlerFunction() === 'insight_rodarSemanalAuto'){
-      ScriptApp.deleteTrigger(t);
-      removed++;
-    }
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if(t.getHandlerFunction() === 'insight_rodarSemanalAuto') ScriptApp.deleteTrigger(t);
   });
-  if(removed){
-    SpreadsheetApp.getUi().alert('gatilho semanal removido ('+removed+').');
-  }
 }
 
-function insight_listarGatilhos(){
-  const triggers = ScriptApp.getProjectTriggers()
-    .filter(t => (t.getHandlerFunction() || '').indexOf('insight_') === 0)
-    .map(t => `${t.getHandlerFunction()} — ${t.getEventType()}`);
-
-  SpreadsheetApp.getUi().alert(triggers.length ? triggers.join('\n') : 'nenhum gatilho de insight encontrado.');
-}
-
-/*
-  Roda toda segunda 06:45:
-  - janela atual: últimos 7 dias completos até ontem (segunda a domingo)
-  - janela anterior: 7 dias anteriores
-*/
 function insight_rodarSemanalAuto(){
   const hoje = insight_startOfDay_(new Date());
-  const fimAtual = insight_addDays_(hoje, -1);        // ontem (domingo, se rodar na segunda)
-  const iniAtual = insight_addDays_(fimAtual, -6);    // 7 dias
+  const fimAtual = insight_addDays_(hoje, -1);
+  const iniAtual = insight_addDays_(fimAtual, -6);
   const fimAnt = insight_addDays_(iniAtual, -1);
   const iniAnt = insight_addDays_(fimAnt, -6);
   insight_gerarComparativo_(iniAtual, fimAtual, iniAnt, fimAnt, {modoAuto: true});
 }
 
-/* ===================== CORE ===================== */
+// === LÓGICA CORE ===
 function insight_gerarComparativo_(iniAtual, fimAtual, iniAnt, fimAnt, opts){
-  opts = opts || {};
   const ss = SpreadsheetApp.getActive();
   const sh = ss.getSheetByName('MESTRE');
-  if(!sh) throw new Error('aba "MESTRE" não encontrada.');
+  if(!sh) throw new Error('Aba MESTRE não encontrada.');
 
   const {headerMap, rows} = insight_lerMestre_(sh);
-
   const atual = insight_filtrarPorPeriodo_(rows, headerMap, iniAtual, fimAtual);
-  const ant   = insight_filtrarPorPeriodo_(rows, headerMap, iniAnt, fimAnt);
-
+  const ant = insight_filtrarPorPeriodo_(rows, headerMap, iniAnt, fimAnt);
   const resumoAtual = insight_resumirPeriodo_(atual, headerMap);
-  const resumoAnt   = insight_resumirPeriodo_(ant, headerMap);
+  const resumoAnt = insight_resumirPeriodo_(ant, headerMap);
 
-  // GA4 (top itens / top estados) — opcional
-    let ga4TopItens = [];
-    let ga4TopEstados = [];
-    let ga4TopPaginasProduto = [];
-
-  try{
-    const propertyId = insight_getScriptProp_('GA4_PROPERTY_ID');
-    if(propertyId){
-      const ymdIni = insight_formatYMD_(iniAtual);
-      const ymdFim = insight_formatYMD_(fimAtual);
-      ga4TopItens = insight_ga4_topItens_(propertyId, ymdIni, ymdFim, 3);
-      ga4TopEstados = insight_ga4_topEstados_(propertyId, ymdIni, ymdFim, 3);
-      ga4TopPaginasProduto = insight_ga4_topPaginasProduto_(propertyId, ymdIni, ymdFim, 30);
-
-    }
-  }catch(e){
-    Logger.log('GA4 indisponível (ok): '+e);
-  }
-
-  const texto = insight_montarTextoWhatsApp_({
-    resumoAtual, resumoAnt,
-    iniAtual, fimAtual, iniAnt, fimAnt,
-    ga4TopItens, ga4TopEstados,
-    ga4TopPaginasProduto
-  });
-
-  insight_salvarSaida_(texto, {
-    conta: resumoAtual.conta || resumoAnt.conta || '',
-    iniAtual, fimAtual, iniAnt, fimAnt,
-    modoAuto: !!opts.modoAuto
-  });
-
+  const texto = insight_montarTextoWhatsApp_({resumoAtual, resumoAnt, iniAtual, fimAtual, iniAnt, fimAnt});
+  insight_salvarSaida_(texto, {conta: resumoAtual.conta, iniAtual, fimAtual, iniAnt, fimAnt, modoAuto: opts?.modoAuto});
   insight_mostrarDialogo_(texto);
 }
 
-/* ===================== LEITURA / RESUMO (MESTRE) ===================== */
 function insight_lerMestre_(sh){
-  const lastRow = sh.getLastRow();
-  const lastCol = sh.getLastColumn();
-  if(lastRow < 2) return { headerMap: {}, rows: [] };
-
-  const values = sh.getRange(1, 1, lastRow, lastCol).getValues();
-  const headers = values[0].map(h => String(h || '').trim());
-
-  const headerMap = {};
-  headers.forEach((h, i) => { if(h) headerMap[h] = i; });
-
-  const rows = values.slice(1); // a partir da linha 2
-  return { headerMap, rows };
+  const vals = sh.getDataRange().getValues();
+  if(vals.length < 2) return {headerMap:{}, rows:[]};
+  const map = {};
+  vals[0].forEach((h,i)=> {if(h) map[String(h).trim()] = i;});
+  return {headerMap: map, rows: vals.slice(1)};
 }
 
 function insight_filtrarPorPeriodo_(rows, headerMap, ini, fim){
-  const idxData = insight_colIndex_(headerMap, 'Data');
-  if(idxData === -1) throw new Error('coluna "Data" não encontrada no cabeçalho da MESTRE.');
-
-  const iniTime = ini.getTime();
-  const fimTime = fim.getTime();
-
-  const out = [];
-  for(const r of rows){
-    const d = insight_toDate_(r[idxData]);
-    if(!d) continue;
-    const t = insight_startOfDay_(d).getTime();
-    if(t >= iniTime && t <= fimTime) out.push(r);
-  }
-
-  // ordena por data (para melhores dias/anomalias)
-  out.sort((a,b) => insight_startOfDay_(insight_toDate_(a[idxData])).getTime() - insight_startOfDay_(insight_toDate_(b[idxData])).getTime());
-  return out;
+  const idx = headerMap['Data'];
+  if(idx === undefined) return [];
+  return rows.filter(r => {
+    const d = insight_toDate_(r[idx]);
+    return d && d >= ini && d <= fim;
+  });
 }
 
-function insight_resumirPeriodo_(rows, headerMap){
-  const idxConta = insight_colIndex_(headerMap, 'Conta ID');
-  const idxData  = insight_colIndex_(headerMap, 'Data');
-
-  const idxInvestTotal = insight_colIndex_(headerMap, 'Total (R$)');
-  const idxInvestFb    = insight_colIndex_(headerMap, 'Facebook (R$)');
-  const idxInvestG     = insight_colIndex_(headerMap, 'Google Ads (R$)');
-
-  const idxSessoes     = insight_colIndex_(headerMap, 'Sessões GA4');
-  const idxReceitaCap  = insight_colIndex_(headerMap, 'Receita Captada GA4 (R$)');
-  const idxTicket      = insight_colIndex_(headerMap, 'Ticket Médio (R$)');
-  const idxRecPaga     = insight_colIndex_(headerMap, 'Receita Paga Bagy (R$)');
-  const idxPedidosPagos= insight_colIndex_(headerMap, 'Pedidos Pagos Bagy');
-  const idxTransacoes  = insight_colIndex_(headerMap, 'Transações GA4');
-
-  let conta = '';
-  let investimento = 0;
-  let sessoes = 0;
-  let receitaCaptada = 0;
-  let receitaPaga = 0;
-  let pedidosPagos = 0;
-  let pedidosCaptados = 0;
-
-  // ticket médio (preferência: receitaPaga/pedidosPagos, fallback: média da coluna)
-  let somaTicket = 0;
-  let cntTicket = 0;
-
-  // por dia (para melhores dias + anomalias completas)
-  const dias = []; // {date, sessoes, pedidosCaptados, pedidosPagos, receitaPaga, txAprovacaoDia}
-
-  for(const r of rows){
-    if(!conta && idxConta !== -1) conta = String(r[idxConta] || '').trim();
-
-    const invTotal = (idxInvestTotal !== -1) ? insight_toNumberBR_(r[idxInvestTotal]) : 0;
-    const invFb    = (idxInvestFb !== -1) ? insight_toNumberBR_(r[idxInvestFb]) : 0;
-    const invG     = (idxInvestG !== -1) ? insight_toNumberBR_(r[idxInvestG]) : 0;
-    investimento += (invTotal > 0 ? invTotal : (invFb + invG));
-
-    const s = (idxSessoes !== -1) ? insight_toNumberBR_(r[idxSessoes]) : 0;
-    sessoes += s;
-
-    const rc = (idxReceitaCap !== -1) ? insight_toNumberBR_(r[idxReceitaCap]) : 0;
-    receitaCaptada += rc;
-
-    const rp = (idxRecPaga !== -1) ? insight_toNumberBR_(r[idxRecPaga]) : 0;
-    receitaPaga += rp;
-
-    const pp = (idxPedidosPagos !== -1) ? insight_toNumberBR_(r[idxPedidosPagos]) : 0;
-    pedidosPagos += pp;
-
-    const pc = (idxTransacoes !== -1) ? insight_toNumberBR_(r[idxTransacoes]) : 0;
-    pedidosCaptados += pc;
-
-    const tkm = (idxTicket !== -1) ? insight_toNumberBR_(r[idxTicket]) : 0;
-    if(tkm > 0){ somaTicket += tkm; cntTicket++; }
-
-    const d = (idxData !== -1) ? insight_startOfDay_(insight_toDate_(r[idxData])) : null;
-    if(d){
-      const txDia = (pc > 0) ? (pp / pc) : null;
-      dias.push({
-        date: d,
-        sessoes: s,
-        pedidosCaptados: pc,
-        pedidosPagos: pp,
-        receitaPaga: rp,
-        txAprovacaoDia: txDia
-      });
-    }
-  }
-
-  let ticketMedio = 0;
-  if(pedidosPagos > 0 && receitaPaga > 0){
-    ticketMedio = receitaPaga / pedidosPagos;
-  }else if(cntTicket > 0){
-    ticketMedio = somaTicket / cntTicket;
-  }
-
-  const txAprovacao = (pedidosCaptados > 0 && pedidosPagos >= 0)
-    ? (pedidosPagos / pedidosCaptados)
-    : null;
-
-  // melhores dias por receita paga
-  const melhoresDias = dias
-    .slice()
-    .sort((a,b) => b.receitaPaga - a.receitaPaga)
-    .filter(x => x.receitaPaga > 0)
-    .slice(0, 3);
-
-  // ===== anomalias (agressores + potencializadores) =====
-  const agressores = [];
-  const potencializadores = [];
-
-  function pct(prev, cur){
-    prev = Number(prev || 0);
-    cur  = Number(cur  || 0);
-    if(prev <= 0) return null;
-    return (cur - prev) / prev;
-  }
-
-   for(let i=1;i<dias.length;i++){
-    const prev = dias[i-1];
-    const cur  = dias[i];
-
-    const pSess  = pct(prev.sessoes, cur.sessoes);
-    const pCap   = pct(prev.pedidosCaptados, cur.pedidosCaptados);
-    const pPag   = pct(prev.pedidosPagos, cur.pedidosPagos);
-    const pRecPg = pct(prev.receitaPaga, cur.receitaPaga);
-
-    const txDia = (cur.txAprovacaoDia == null) ? null : Number(cur.txAprovacaoDia);
-
-    const queda30 =
-      (pSess  != null && pSess  <= -0.30) ||
-      (pCap   != null && pCap   <= -0.30) ||
-      (pPag   != null && pPag   <= -0.30) ||
-      (pRecPg != null && pRecPg <= -0.30);
-
-    const pico30 =
-      (pSess  != null && pSess  >=  0.30) ||
-      (pCap   != null && pCap   >=  0.30) ||
-      (pPag   != null && pPag   >=  0.30) ||
-      (pRecPg != null && pRecPg >=  0.30);
-
-    // mantém a aprovação no objeto (se você quiser usar depois), mas NÃO vamos exibir no WhatsApp
-    const aprovRuim = (txDia != null && txDia < 0.80);
-    const aprovTop  = (txDia != null && txDia >= 0.90);
-
-    const pack = {
-      date: cur.date,
-      sessoes: cur.sessoes,
-      pedidosCaptados: cur.pedidosCaptados,
-      pedidosPagos: cur.pedidosPagos,
-      receitaPaga: cur.receitaPaga,
-      txAprovacaoDia: txDia,
-      pctSessoes: pSess,
-      pctCaptados: pCap,
-      pctPagos: pPag,
-      pctReceitaPaga: pRecPg
-    };
-
-    if(queda30 || aprovRuim) agressores.push(pack);
-    if(pico30 || aprovTop) potencializadores.push(pack);
-  }
-
-  const anomalias = { agressores, potencializadores };
-
+function insight_resumirPeriodo_(rows, map){
+  let conta='', inv=0, sess=0, revCap=0, revPag=0, pedCap=0, pedPag=0;
+  rows.forEach(r => {
+    if(!conta && map['Conta ID']) conta = r[map['Conta ID']];
+    inv += insight_toNumberBR_(r[map['Total (R$)']] || r[map['Facebook (R$)']]);
+    sess += insight_toNumberBR_(r[map['Sessões GA4']]);
+    revCap += insight_toNumberBR_(r[map['Receita Captada GA4 (R$)']]);
+    revPag += insight_toNumberBR_(r[map['Receita Paga Bagy (R$)']]);
+    pedPag += insight_toNumberBR_(r[map['Pedidos Pagos Bagy']]);
+    pedCap += insight_toNumberBR_(r[map['Transações GA4']]);
+  });
   return {
-    conta,
-    investimento,
-    sessoes,
-    receitaCaptada,
-    receitaPaga,
-    pedidosCaptados,
-    pedidosPagos,
-    txAprovacao,
-    ticketMedio,
-    melhoresDias,
-    anomalias
+    conta, investimento:inv, sessoes:sess, receitaCaptada:revCap, receitaPaga:revPag,
+    pedidosCaptados:pedCap, pedidosPagos:pedPag,
+    ticketMedio: pedPag>0 ? revPag/pedPag : 0,
+    txAprovacao: pedCap>0 ? pedPag/pedCap : 0
   };
 }
 
- 
-
-/* ===================== TEXTO WHATSAPP ===================== */
+// === FORMATAÇÃO E SAÍDA ===
 function insight_montarTextoWhatsApp_(ctx){
-  const {
-    resumoAtual, resumoAnt,
-    iniAtual, fimAtual, iniAnt, fimAnt,
-    ga4TopItens, ga4TopEstados
-  } = ctx;
+  const {resumoAtual: cur, resumoAnt: prev} = ctx;
+  const pct = (a,b) => (b>0 ? (a-b)/b : 0);
+  const fmt = (n, m) => (m ? (n*100).toFixed(1)+'%' : n.toLocaleString('pt-BR'));
+  const fmtM = (n) => n.toLocaleString('pt-BR',{style:'currency', currency:'BRL'});
 
-  const conta = resumoAtual.conta || resumoAnt.conta || 'conta';
-
-  const pInvest = insight_pctChange_(resumoAtual.investimento, resumoAnt.investimento);
-  const pSess   = insight_pctChange_(resumoAtual.sessoes, resumoAnt.sessoes);
-  const pRecCap = insight_pctChange_(resumoAtual.receitaCaptada, resumoAnt.receitaCaptada);
-  const pRecPag = insight_pctChange_(resumoAtual.receitaPaga, resumoAnt.receitaPaga);
-
-  const rangeAtual = `${insight_formatBR_(iniAtual)} a ${insight_formatBR_(fimAtual)}`;
-  const rangeAnt   = `${insight_formatBR_(iniAnt)} a ${insight_formatBR_(fimAnt)}`;
-
-  const linhas = [];
-
-  function sep_(){
-    linhas.push('──────────────');
-    linhas.push('ㅤ');
-  }
-
-  function cleanRegion_(s){
-    s = String(s || '').trim();
-    s = s.replace(/^State of\s+/i, '');
-    s = s.replace(/^Estado de\s+/i, '');
-    return s;
-  }
-
-  // ✅ retorna a linha COMPLETA só se a condição bater
-  function lineIf_(cond, label, valueStr, pct){
-    if(!cond) return null;
-    // pct vem como decimal (ex: -0.441) e formatamos
-    const pctStr = (pct === null || pct === undefined) ? '' : ` (${insight_formatPctSigned_(pct)})`;
-    return `•⁠  ⁠${label}: ${valueStr}${pctStr}`;
-  }
-
-  // regras: agressores = só quedas <= -30% | potencializadores = só altas >= +30%
-  function isDrop30_(pct){ return (pct != null && Number(pct) <= -0.30); }
-  function isUp30_(pct){   return (pct != null && Number(pct) >=  0.30); }
-
-  // ============ CABEÇALHO ============
-  linhas.push(`${conta} (Atualização)`);
-  linhas.push(`🗓️ Período: ${rangeAtual}`);
-  linhas.push(`🔁 Comparativo: ${rangeAnt}`);
-  linhas.push('ㅤ');
-
-  // ============ VISÃO GERAL ============
-  linhas.push(`🎯 *Visão Geral*`);
-  linhas.push('');
-
-  linhas.push(`•⁠  ⁠Investimento Meta: ${insight_formatBRL_(resumoAtual.investimento)}.  |  ${insight_formatPctSigned_(pInvest)}`);
-  linhas.push(`•⁠  ⁠Sessões / Acessos (GA4): ${insight_formatInt_(resumoAtual.sessoes)}.  |  ${insight_formatPctSigned_(pSess)}`);
-  linhas.push(`•⁠  ⁠Pedidos captados: ${insight_formatInt_(resumoAtual.pedidosCaptados)} .  |  Pagos: ${insight_formatInt_(resumoAtual.pedidosPagos)} .`);
-  const tx = (resumoAtual.txAprovacao == null) ? 'n/a' : insight_formatPctSigned_(resumoAtual.txAprovacao);
-  linhas.push(`•  Aprovação (pagos/captados): ${tx}`);
-  linhas.push('');
-
-  linhas.push(`•⁠  ⁠Vendas Bruto (Total): ${insight_formatBRL_(resumoAtual.receitaCaptada)}.  |  ${insight_formatPctSigned_(pRecCap)}`);
-  linhas.push(`•⁠  ⁠*Vendas [Pagos] : ${insight_formatBRL_(resumoAtual.receitaPaga)}.*  |  ${insight_formatPctSigned_(pRecPag)}`);
-  linhas.push(`•⁠  ⁠Ticket médio: ${insight_formatBRL_(resumoAtual.ticketMedio)}`);
-
-  linhas.push('ㅤ');
-  sep_();
-
-  // ============ INSIGHTS ============
-  linhas.push(`Insights 🔥`);
-  linhas.push('');
-  linhas.push(`Melhores dias (Faturado / Pago)`);
-  linhas.push('');
-
-  if(resumoAtual.melhoresDias && resumoAtual.melhoresDias.length){
-    resumoAtual.melhoresDias.forEach(d => {
-      linhas.push(`✅ ${insight_formatBR_(d.date)}: ${insight_formatBRL_(d.receitaPaga)} | ${insight_formatInt_(d.pedidosPagos)} pedidos`);
-    });
-  }else{
-    linhas.push('—');
-  }
-
-  linhas.push('ㅤ');
-
-  if(ga4TopItens && ga4TopItens.length){
-    linhas.push(`🏷️ Itens / variações em destaque (GA4)`);
-    linhas.push('');
-    ga4TopItens.forEach(it => {
-      const nome = it.nome || '';
-      const varTxt = it.variacao ? ` | ${it.variacao}` : '';
-      const qtdTxt = (it.qtd != null) ? ` | ${insight_formatInt_(it.qtd)} unid.` : '';
-      linhas.push(`•⁠  ⁠${nome}${varTxt} — ${insight_formatBRL_(it.receita)}${qtdTxt}`);
-    });
-    linhas.push('ㅤ');
-  }
-
-  if(ga4TopEstados && ga4TopEstados.length){
-    linhas.push(`📍Regiões em destaque (GA4)`);
-    linhas.push('');
-    ga4TopEstados.forEach(r => {
-      linhas.push(`•⁠  ⁠${cleanRegion_(r.nome)} — ${insight_formatBRL_(r.receita)}`);
-    });
-  }
-
-  linhas.push('ㅤ');
-  sep_();
-
-  // ============ ANOMALIAS ============
-  const an = resumoAtual.anomalias || {};
-  const ag = (an.agressores || []).slice(0, 8);
-  const po = (an.potencializadores || []).slice(0, 8);
-
-  linhas.push(`Anomalias do período (Consideradas quando maior que 30%)`);
-  linhas.push('');
-
-  // ---------- AGRESSORES (só quedas <= -30%, escondendo a linha toda) ----------
-  linhas.push(`🚨 Agressores de resultado`);
-  linhas.push('');
-
-  let printedAg = 0;
-  if(ag.length){
-    ag.forEach(a => {
-      const items = [];
-
-      const l1 = lineIf_(isDrop30_(a.pctSessoes),       'Sessões',       insight_formatInt_(a.sessoes), a.pctSessoes);
-      const l2 = lineIf_(isDrop30_(a.pctCaptados),      'Captados',      insight_formatInt_(a.pedidosCaptados), a.pctCaptados);
-      const l3 = lineIf_(isDrop30_(a.pctPagos),         'Pagos',         insight_formatInt_(a.pedidosPagos), a.pctPagos);
-      const l4 = lineIf_(isDrop30_(a.pctReceitaPaga),   'Receita paga',  insight_formatBRL_(a.receitaPaga), a.pctReceitaPaga);
-
-      if(l1) items.push(l1);
-      if(l2) items.push(l2);
-      if(l3) items.push(l3);
-      if(l4) items.push(l4);
-
-      // ✅ se não tem nenhuma queda >=30%, não imprime esse dia
-      if(!items.length) return;
-
-      linhas.push(`⚠️ ${insight_formatBR_(a.date)}`);
-      items.forEach(x => linhas.push(x));
-      linhas.push(''); // espaçamento entre dias
-      printedAg++;
-    });
-  }
-
-  if(!printedAg){
-    linhas.push('—');
-    linhas.push('');
-  }
-
-  sep_();
-
-  // ---------- POTENCIALIZADORES (só altas >= +30%, escondendo a linha toda) ----------
-  linhas.push(`🚀 Potencializadores de resultado (picos)`);
-  linhas.push('');
-
-  let printedPo = 0;
-  if(po.length){
-    po.forEach(a => {
-      const items = [];
-
-      const l1 = lineIf_(isUp30_(a.pctSessoes),        'Sessões',       insight_formatInt_(a.sessoes), a.pctSessoes);
-      const l2 = lineIf_(isUp30_(a.pctCaptados),       'Captados',      insight_formatInt_(a.pedidosCaptados), a.pctCaptados);
-      const l3 = lineIf_(isUp30_(a.pctPagos),          'Pagos',         insight_formatInt_(a.pedidosPagos), a.pctPagos);
-      const l4 = lineIf_(isUp30_(a.pctReceitaPaga),    'Receita paga',  insight_formatBRL_(a.receitaPaga), a.pctReceitaPaga);
-
-      if(l1) items.push(l1);
-      if(l2) items.push(l2);
-      if(l3) items.push(l3);
-      if(l4) items.push(l4);
-
-      // ✅ se não tem nenhum pico >=30%, não imprime esse dia
-      if(!items.length) return;
-
-      linhas.push(`🔥 ${insight_formatBR_(a.date)}`);
-      items.forEach(x => linhas.push(x));
-      linhas.push(''); // espaçamento entre dias
-      printedPo++;
-    });
-  }
-
-  if(!printedPo){
-    linhas.push('—');
-    linhas.push('');
-  }
-
-  sep_();
-
-  // ============ NOTAS ============
-  linhas.push(`📝 Notas e observações`);
-  linhas.push(`•⁠  ⁠Quedas em sessões, captados, pagos ou receita acima de 30% entram como alerta.`);
-  linhas.push(`•⁠  ⁠Picos (alta ≥ 30%) são destacados para identificar o que foi feito no dia e repetir.`);
-  linhas.push('');
-
-  return linhas.join('\n');
+  const lines = [
+    `📊 *Resumo: ${cur.conta || 'Geral'}*`,
+    `Período: ${insight_formatBR_(ctx.iniAtual)} a ${insight_formatBR_(ctx.fimAtual)}`,
+    '',
+    `• Investimento: ${fmtM(cur.investimento)} (${fmt(pct(cur.investimento, prev.investimento),1)})`,
+    `• Receita Paga: ${fmtM(cur.receitaPaga)} (${fmt(pct(cur.receitaPaga, prev.receitaPaga),1)})`,
+    `• ROAS: ${(cur.receitaPaga/cur.investimento).toFixed(2)}`,
+    `• Pedidos Pagos: ${cur.pedidosPagos}`,
+    ''
+  ];
+  return lines.join('\n');
 }
 
-
-
-
- 
-/* ===================== SAÍDA (SHEET + DIALOG) ===================== */
-function insight_salvarSaida_(texto, meta){
+function insight_salvarSaida_(txt, meta){
   const ss = SpreadsheetApp.getActive();
-  const outName = 'insight_WHATSAPP';
-  let sh = ss.getSheetByName(outName);
-  if(!sh) sh = ss.insertSheet(outName);
-
-  sh.getRange('A1').setValue('insight pronto para copiar (texto abaixo)');
-  sh.getRange('A2').setValue(texto);
-
-  sh.getRange('A1').setFontWeight('bold');
-  sh.getRange('A2').setWrap(true);
-  sh.setColumnWidth(1, 900);
-  sh.setRowHeights(2, 2, 420);
-
-  // histórico (append)
-  const row = sh.getLastRow() + 2;
-  sh.getRange(row, 1).setValue('histórico');
-  sh.getRange(row, 1).setFontWeight('bold');
-
-  const headerRow = row + 1;
-  sh.getRange(headerRow, 1, 1, 6).setValues([['gerado em','conta','período atual','período anterior','modo','texto']])
-    .setFontWeight('bold');
-
-  const dataRow = headerRow + 1;
-  sh.getRange(dataRow, 1, 1, 6).setValues([[
-    new Date(),
-    meta.conta || '',
-    `${insight_formatBR_(meta.iniAtual)} a ${insight_formatBR_(meta.fimAtual)}`,
-    `${insight_formatBR_(meta.iniAnt)} a ${insight_formatBR_(meta.fimAnt)}`,
-    meta.modoAuto ? 'automático' : 'manual/menu',
-    texto
-  ]]);
-
-  sh.getRange(dataRow, 1).setNumberFormat('dd/mm/yyyy hh:mm');
-  sh.getRange(dataRow, 3, 1, 2).setNumberFormat('@');
-  sh.getRange(dataRow, 6).setWrap(true);
-
-  // deixa “A2” sempre visível
-  sh.setFrozenRows(1);
+  let sh = ss.getSheetByName('insight_WHATSAPP');
+  if(!sh) sh = ss.insertSheet('insight_WHATSAPP');
+  sh.getRange(1,1).setValue(txt);
 }
 
-function insight_mostrarDialogo_(texto){
-  const safe = insight_escapeHtml_(texto);
-  const html = HtmlService.createHtmlOutput(`
-    <div style="font-family: Arial, sans-serif; padding: 14px;">
-      <div style="font-size:14px; margin-bottom:10px;"><b>insight pronto para copiar</b></div>
-      <textarea style="width:100%; height:420px; padding:10px; border:1px solid #ddd; border-radius:10px; font-size:12px; line-height:1.35;">${safe}</textarea>
-      <div style="margin-top:10px; font-size:12px; color:#555;">
-        dica: clique no texto, pressione <b>ctrl+a</b> e depois <b>ctrl+c</b>.
-      </div>
-    </div>
-  `).setWidth(560).setHeight(560);
-
-  SpreadsheetApp.getUi().showModelessDialog(html, 'insight');
+function insight_mostrarDialogo_(txt){
+  const html = HtmlService.createHtmlOutput(`<textarea style="width:100%;height:300px;">${txt}</textarea>`).setWidth(400).setHeight(400);
+  SpreadsheetApp.getUi().showModelessDialog(html, 'Copia aí');
 }
 
-/* ===================== GA4 (OPCIONAL) ===================== */
-/*
-  Este bloco tenta usar o serviço avançado "Google Analytics Data API" (AnalyticsData).
-  Se sua integração atual já tem funções prontas, você pode simplesmente substituir o miolo
-  de insight_ga4_runReport_() para chamar a sua função existente.
-*/
-
-function insight_ga4_topItens_(propertyId, startYmd, endYmd, limit){
-  // tentativa 1: itemName + itemVariant (se sua implementação tiver cor/tamanho aqui, já vem junto)
-  try{
-    const res = insight_ga4_runReport_(
-      propertyId, startYmd, endYmd,
-      ['itemName','itemVariant'],
-      ['itemRevenue','itemPurchaseQuantity'],
-      limit, 'itemRevenue'
-    );
-    return insight_ga4_parseTopItens_(res, true);
-  }catch(e1){
-    // fallback: itemName
-    try{
-      const res2 = insight_ga4_runReport_(propertyId, startYmd, endYmd, ['itemName'], ['itemRevenue','itemPurchaseQuantity'], limit, 'itemRevenue');
-      return insight_ga4_parseTopItens_(res2, false);
-    }catch(e2){
-      // fallback 2: purchaseRevenue/itemsPurchased
-      const res3 = insight_ga4_runReport_(propertyId, startYmd, endYmd, ['itemName'], ['purchaseRevenue','itemsPurchased'], limit, 'purchaseRevenue');
-      return insight_ga4_parseTopItens_(res3, false);
-    }
-  }
-}
-
-function insight_ga4_parseTopItens_(res, hasVariant){
-  const rows = (res && res.rows) ? res.rows : [];
-  const out = [];
-  for(const r of rows){
-    const nome = (r.dimensionValues && r.dimensionValues[0]) ? (r.dimensionValues[0].value || '') : '';
-    const variacao = (hasVariant && r.dimensionValues && r.dimensionValues[1]) ? (r.dimensionValues[1].value || '') : '';
-    const receita = (r.metricValues && r.metricValues[0]) ? Number(r.metricValues[0].value || 0) : 0;
-    const qtd = (r.metricValues && r.metricValues[1]) ? Number(r.metricValues[1].value || 0) : null;
-    if(nome) out.push({ nome, variacao: variacao || '', receita, qtd });
-  }
-  return out.slice(0, 3);
-}
-
-
-function insight_ga4_topEstados_(propertyId, startYmd, endYmd, limit){
-  try{
-    const res = insight_ga4_runReport_(propertyId, startYmd, endYmd, ['region'], ['purchaseRevenue'], limit, 'purchaseRevenue');
-    return insight_ga4_parseTopRegioes_(res);
-  }catch(e1){
-    const res2 = insight_ga4_runReport_(propertyId, startYmd, endYmd, ['region'], ['totalRevenue'], limit, 'totalRevenue');
-    return insight_ga4_parseTopRegioes_(res2);
-  }
-}
-
-function insight_ga4_topPaginasProduto_(propertyId, startYmd, endYmd, limit){
-  // Tentativa: pagePath com sessions + purchases (se sua propriedade permitir)
-  // Se falhar, apenas retorna [] sem quebrar o insight.
-  try{
-    const res = insight_ga4_runReport_(
-      propertyId, startYmd, endYmd,
-      ['pagePath'],
-      ['sessions','purchases'],
-      String(limit || 30),
-      'purchases'
-    );
-    const rows = (res && res.rows) ? res.rows : [];
-    const out = [];
-
-    function isProdutoPath(p){
-      if(!p) return false;
-      const s = String(p).toLowerCase().trim();
-      if(s === '/' || s === '') return false;                   // home
-      if(s.indexOf('cart') !== -1) return false;
-      if(s.indexOf('carrinho') !== -1) return false;
-      if(s.indexOf('checkout') !== -1) return false;
-      if(s.indexOf('finalizar') !== -1) return false;
-      // Heurística simples: manter paths “de produto” (ajuste se você tiver padrão específico)
-      // Se não quiser heurística, remova a linha abaixo e deixe só os excludes.
-      return true;
-    }
-
-    for(const r of rows){
-      const path = (r.dimensionValues && r.dimensionValues[0]) ? (r.dimensionValues[0].value || '') : '';
-      if(!isProdutoPath(path)) continue;
-
-      const sessoes = (r.metricValues && r.metricValues[0]) ? Number(r.metricValues[0].value || 0) : 0;
-      const purchases = (r.metricValues && r.metricValues[1]) ? Number(r.metricValues[1].value || 0) : 0;
-      if(sessoes <= 0 || purchases <= 0) continue;
-
-      out.push({
-        path,
-        sessoes,
-        purchases,
-        conversao: purchases / sessoes
-      });
-    }
-
-    // ordena por conversão desc e pega top
-    out.sort((a,b) => (b.conversao - a.conversao));
-    return out.slice(0, 3);
-  }catch(e){
-    Logger.log('GA4 páginas produto indisponível (ok): '+e);
-    return [];
-  }
-}
-
-
-function insight_ga4_runReport_(propertyId, startYmd, endYmd, dimensions, metrics, limit, orderByMetric){
-  if(typeof AnalyticsData === 'undefined'){
-    throw new Error('serviço AnalyticsData não disponível. (se necessário: habilite em "Services" no Apps Script)');
-  }
-
-  const request = {
-    dateRanges: [{ startDate: startYmd, endDate: endYmd }],
-    dimensions: dimensions.map(n => ({ name: n })),
-    metrics: metrics.map(n => ({ name: n })),
-    limit: String(limit || 10),
-    orderBys: orderByMetric ? [{ metric: { metricName: orderByMetric }, desc: true }] : undefined
-  };
-
-  return AnalyticsData.Properties.runReport(request, 'properties/' + String(propertyId).trim());
-}
-
-function insight_ga4_parseTopItens_(res){
-  const rows = (res && res.rows) ? res.rows : [];
-  const out = [];
-  for(const r of rows){
-    const nome = (r.dimensionValues && r.dimensionValues[0]) ? r.dimensionValues[0].value : '';
-    const receita = (r.metricValues && r.metricValues[0]) ? Number(r.metricValues[0].value || 0) : 0;
-    const qtd = (r.metricValues && r.metricValues[1]) ? Number(r.metricValues[1].value || 0) : null;
-    if(nome) out.push({ nome, receita, qtd });
-  }
-  return out.slice(0, 3);
-}
-
-function insight_ga4_parseTopRegioes_(res){
-  const rows = (res && res.rows) ? res.rows : [];
-  const out = [];
-  for(const r of rows){
-    const nome = (r.dimensionValues && r.dimensionValues[0]) ? r.dimensionValues[0].value : '';
-    const receita = (r.metricValues && r.metricValues[0]) ? Number(r.metricValues[0].value || 0) : 0;
-    if(nome) out.push({ nome, receita });
-  }
-  return out.slice(0, 3);
-}
-
-/* ===================== HELPERS ===================== */
-function insight_colIndex_(headerMap, name){
-  return Object.prototype.hasOwnProperty.call(headerMap, name) ? headerMap[name] : -1;
-}
-
-function insight_toNumberBR_(v){
-  if(v === null || v === '') return 0;
-  if(typeof v === 'number') return v;
-  if(v instanceof Date) return 0;
-
-  let s = String(v).trim();
-
-  // percent
-  if(s.endsWith('%')){
-    s = s.replace('%','').trim();
-    s = s.replace(/\./g,'').replace(',','.');
-    const n = Number(s);
-    return isNaN(n) ? 0 : (n/100);
-  }
-
-  // moeda / geral pt-br
-  s = s.replace(/[^\d,\-\.]/g,''); // remove R$, espaços etc
-  // se vier no padrão "1.234,56"
-  s = s.replace(/\./g,'').replace(',','.');
-  const n = Number(s);
-  return isNaN(n) ? 0 : n;
-}
-
-function insight_toDate_(v){
-  if(v instanceof Date) return v;
-  if(typeof v === 'string'){
-    const d = insight_parseBRDate_(v);
-    if(d) return d;
-  }
-  return null;
-}
-
-function insight_parseBRDate_(s){
-  const m = String(s || '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if(!m) return null;
-  const dd = Number(m[1]), mm = Number(m[2]), yy = Number(m[3]);
-  const d = new Date(yy, mm-1, dd);
-  // valida
-  if(d.getFullYear() !== yy || d.getMonth() !== (mm-1) || d.getDate() !== dd) return null;
-  return insight_startOfDay_(d);
-}
-
-function insight_startOfDay_(d){
-  const x = new Date(d);
-  x.setHours(0,0,0,0);
-  return x;
-}
-
-function insight_addDays_(d, n){
-  const x = new Date(d);
-  x.setDate(x.getDate() + n);
-  return insight_startOfDay_(x);
-}
-
-function insight_daysDiffInclusive_(ini, fim){
-  const a = insight_startOfDay_(ini).getTime();
-  const b = insight_startOfDay_(fim).getTime();
-  return Math.floor((b - a) / 86400000) + 1;
-}
-
-function insight_formatBR_(d){
-  const dd = String(d.getDate()).padStart(2,'0');
-  const mm = String(d.getMonth()+1).padStart(2,'0');
-  const yy = d.getFullYear();
-  return `${dd}/${mm}/${yy}`;
-}
-
-function insight_formatYMD_(d){
-  const yy = d.getFullYear();
-  const mm = String(d.getMonth()+1).padStart(2,'0');
-  const dd = String(d.getDate()).padStart(2,'0');
-  return `${yy}-${mm}-${dd}`;
-}
-
-function insight_formatBRL_(n){
-  n = Number(n || 0);
-  return n.toLocaleString('pt-BR', { style:'currency', currency:'BRL' });
-}
-
-function insight_formatInt_(n){
-  n = Math.round(Number(n || 0));
-  return n.toLocaleString('pt-BR');
-}
-
-function insight_pctChange_(cur, prev){
-  cur = Number(cur || 0);
-  prev = Number(prev || 0);
-  if(prev === 0) return null;
-  return (cur - prev) / prev;
-}
-
-function insight_formatPct_(pct){
-  if(pct === null || pct === undefined) return 'n/a';
-  const v = Number(pct);
-  const s = (v*100).toLocaleString('pt-BR', { maximumFractionDigits: 1, minimumFractionDigits: 1 });
-  // mantém sinal quando negativo; quando positivo pode ficar sem "+"
-  return (v >= 0 ? s+'%' : s+'%');
-}
-
-function insight_formatPctSigned_(pct){
-  if(pct === null || pct === undefined) return 'n/a';
-  const v = Number(pct);
-  const s = (v*100).toLocaleString('pt-BR', { maximumFractionDigits: 1, minimumFractionDigits: 1 }) + '%';
-  return (v > 0 ? ('+' + s) : s);
-}
-
-function insight_badge_(pct){
-  if(pct === null || pct === undefined) return '➖';
-  if(pct <= -0.20) return '⚠️';
-  if(pct >=  0.20) return '✅';
-  return '➖';
-}
-
-function insight_getScriptProp_(key){
-  return PropertiesService.getScriptProperties().getProperty(key);
-}
-
-function insight_escapeHtml_(s){
-  return String(s || '')
-    .replace(/&/g,'&amp;')
-    .replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;')
-    .replace(/"/g,'&quot;');
-}
-
-function myFunction() {
-  
-}
+// Helpers Locais Insights
+function insight_startOfDay_(d){ const x=new Date(d); x.setHours(0,0,0,0); return x; }
+function insight_addDays_(d,n){ const x=new Date(d); x.setDate(x.getDate()+n); return insight_startOfDay_(x); }
+function insight_parseBRDate_(s){ const p=String(s).trim().split('/'); return p.length===3 ? new Date(p[2],p[1]-1,p[0]) : null; }
+function insight_toDate_(v){ return (v instanceof Date) ? insight_startOfDay_(v) : insight_parseBRDate_(v); }
+function insight_toNumberBR_(v){ if(typeof v==='number') return v; return Number(String(v).replace('.','').replace(',','.'))||0; }
+function insight_formatBR_(d){ return Utilities.formatDate(d, Session.getScriptTimeZone(), 'dd/MM/yyyy'); }
