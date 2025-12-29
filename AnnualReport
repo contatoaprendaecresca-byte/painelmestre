@@ -1,0 +1,45 @@
+/**
+ * AnnualReport.gs
+ * Relatório Anual (A:D).
+ */
+
+function AEC_buildAnnualReport() {
+  const ss = SpreadsheetApp.getActive();
+  const src = ss.getSheetByName('MESTRE');
+  if (!src) throw new Error('MESTRE não encontrada.');
+  const data = src.getDataRange().getValues();
+  if (data.length < 2) return;
+  
+  const h = data[0].map(String);
+  const idx = {
+    date: h.indexOf('Data'),
+    paid: h.indexOf('Receita Paga LojaVirtual (R$)'),
+    spend: h.indexOf('Total (R$)')
+  };
+  
+  const years = {};
+  data.slice(1).forEach(r => {
+    const d = new Date(r[idx.date]);
+    if(isNaN(d)) return;
+    const y = d.getFullYear();
+    const m = d.getMonth(); // 0-11
+    if(!years[y]) years[y] = Array(12).fill(0).map(()=>({paid:0, spend:0}));
+    
+    years[y][m].paid += Number(r[idx.paid]||0);
+    years[y][m].spend += Number(r[idx.spend]||0);
+  });
+  
+  let sh = ss.getSheetByName('RELATORIO_ANUAL');
+  if(!sh) sh = ss.insertSheet('RELATORIO_ANUAL');
+  sh.clear();
+  
+  sh.appendRow(['Ano', 'Mês', 'Receita Paga', 'Investimento']);
+  Object.keys(years).sort().forEach(y => {
+    years[y].forEach((vals, m) => {
+      sh.appendRow([y, m+1, vals.paid, vals.spend]);
+    });
+  });
+  
+  // Aqui você pode inserir os gráficos programaticamente se desejar
+  // (Lógica de gráficos mantida simplificada aqui para brevidade)
+}
