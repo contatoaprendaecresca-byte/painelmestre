@@ -1,0 +1,70 @@
+/**
+ * Main.gs
+ * Responsável pelos Menus unificados e configurações globais.
+ */
+
+function onOpen(e) {
+  const ui = SpreadsheetApp.getUi();
+
+  // 1. MENU PRINCIPAL: Motor e Configurações
+  ui.createMenu('⚙️ AEC Motor & Admin')
+    .addItem('1. Criar / Verificar Estrutura (Bootstrap)', 'bootstrap')
+    .addItem('2. Ler Propriedades (Script Properties)', 'syncPropsFromSheet')
+    .addSeparator()
+    .addItem('🔄 Atualizar últimos 3 dias (Force)', 'runRecent3d')
+    .addItem('🔄 Atualizar últimos 5 dias (Force)', 'runRecent5d')
+    .addItem('📅 Atualizar 1 dia específico...', 'runSingleDatePrompt')
+    .addItem('📅 Atualizar intervalo manual...', 'runRangePrompt')
+    .addItem('📅 Fixar dados (de 23/12 até hoje)', 'runFixFrom_2025_12_23')
+    .addSeparator()
+    .addItem('⚠️ Refazer do zero (desde Start Date)', 'runBlocksFromScratch')
+    .addSeparator()
+    .addItem('⏰ Instalar gatilho 06:00 (Auto)', 'installRecent3dTrigger')
+    .addItem('❌ Remover gatilho 06:00', 'uninstallRecent3dTrigger')
+    .addItem('👀 Ver gatilhos ativos', 'menuListTriggers')
+    .addToUi();
+
+  // 2. MENU RELATÓRIOS: Visuais e Planilhas
+  ui.createMenu('📊 AEC Relatórios')
+    .addItem('🖥️ Abrir Painel Visual (Dashboard)', 'showDashboard_')
+    .addSeparator()
+    .addItem('📑 Gerar Relatório Anual (Aba)', 'AEC_buildAnnualReport')
+    .addItem('🛍️ Gerar LojaVirtual MesAtual Overview', 'runLojaVirtualMesAtualOverview_')
+    .addItem('🛍️ Gerar Resumo LojaVirtual Mensal', 'buildLojaVirtualMonthlyRollup_')
+    .addSeparator()
+    .addItem('🔧 Dashboard Cache: Rebuild', 'DASH_CACHE_REBUILD')
+    .addItem('🔧 Dashboard Cache: Sync', 'DASH_CACHE_SYNC')
+    .addToUi();
+
+  // 3. MENU INSIGHTS: WhatsApp
+  ui.createMenu('💡 AEC Insights (Whats)')
+    .addItem('Hoje vs Ontem', 'insight_hojeVsOntem')
+    .addSeparator()
+    .addItem('Últimos 3 dias', 'insight_ultimos3Dias')
+    .addItem('Últimos 7 dias', 'insight_ultimos7Dias')
+    .addItem('Últimos 14 dias', 'insight_ultimos14Dias')
+    .addItem('Últimos 30 dias', 'insight_ultimos30Dias')
+    .addSeparator()
+    .addItem('Período Manual...', 'insight_periodoManual')
+    .addSeparator()
+    .addItem('⏰ Instalar gatilho semanal (Seg 06:45)', 'insight_instalarGatilhoSemanal')
+    .addItem('❌ Remover gatilho semanal', 'insight_removerGatilhoSemanal')
+    .addToUi();
+}
+
+function onInstall(e) {
+  onOpen(e);
+}
+
+// === UTILITÁRIOS DE GATILHO COMPARTILHADOS ===
+
+function menuListTriggers() {
+  const triggers = ScriptApp.getProjectTriggers();
+  const lines = triggers.map(t => {
+    let src = t.getTriggerSource && t.getTriggerSource();
+    let et = t.getEventType && t.getEventType();
+    return `• ${t.getHandlerFunction()} | ${src || 'CLOCK'} | ${et || 'TIME'}`;
+  });
+  const msg = lines.length ? lines.join('\n') : 'Nenhum trigger ativo.';
+  SpreadsheetApp.getUi().alert('Triggers deste projeto:\n\n' + msg);
+}
