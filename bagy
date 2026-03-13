@@ -1,0 +1,522 @@
+/*
+ * Bagy.gs — MTD e Mensal (baseado na aba MESTRE)
+ */
+
+/*******************************
+ * bagy.gs (CORRIGIDO)
+ * - Não depende do START_DATE do MESTRE
+ * - Usa Script Properties:
+ *     BAGY_START_DATE = YYYY-MM-DD  (início do mensal, ex 2025-01-01)
+ *     BAGY_MTD_REF    = YYYY-MM | YYYY-MM-DD (override opcional do MTD)
+ * - MTD_REF default fica automático
+ *******************************/
+
+/* ===================== BAGY (visão) — MTD e Mensal ===================== */
+function addBagyMenu_(){
+  try{
+    SpreadsheetApp.getUi()
+      .createMenu('BAGY (visão)')
+      .addItem('1) Gerar MTD vs mês anterior (Bagy)', 'runBagyMTDOverview_')
+      .addItem('2) Gerar RESUMO_BAGY_MENSAL', 'buildBagyMonthlyRollup_')
+      .addSeparator()
+      .addItem('3) Criar gatilho diário 7h (MTD)', 'createBagyMTDTrigger_')
+      .addItem('4) Remover gatilho 7h (MTD)', 'removeBagyMTDTrigger_')
+      .addToUi();
+  }catch(e){ Logger.log('Menu BAGY: '+e); }
+}
+
+/* ===== Gatilhos (opcional) ===== */
+function createBagyMTDTrigger_(){
+  const fn = 'runBagyMTDOverview_';
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === fn)
+    .forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger(fn).timeBased().atHour(7).everyDays(1).create();
+  SpreadsheetApp.getUi().alert('Gatilho 7h criado para BAGY MTD.');
+}
+
+function removeBagyMTDTrigger_(){
+  const fn = 'runBagyMTDOverview_';
+  const arr = ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === fn);
+  arr.forEach(t => ScriptApp.deleteTrigger(t));
+  SpreadsheetApp.getUi().alert('Removidos ' + arr.length + ' gatilho(s) do BAGY MTD.');
+}
+
+/* ===== Config (defaults) ===== */
+const BAGY_MTD_REF_DEFAULT   = '';          // '' = automático
+const BAGY_START_DATE_DEFAULT = '';         // '' = usa primeira data com dados
+
+function _bagyProp_(key){
+  try{
+    return (PropertiesService.getScriptProperties().getProperty(key) || '').trim();
+  }catch(e){
+    return '';
+  }
+}
+
+/* Retorna a última data existente em rows (coluna r.data) */
+function lastDataDate_(rows){
+  let best = null;
+  rows.forEach(r=>{
+    const d = parseDate_(r.data);
+    if (d && (!best || d > best)) best = d;
+  });
+  return best;
+}
+
+/* Encontra a última data com dados dentro de um mês/ano específico */
+function lastDataInMonth_(rows, year, month){ // month: 0..11
+  let best = null;
+  rows.forEach(r=>{
+    const d = parseDate_(r.data);
+    if (d && d.getFullYear() === year && d.getMonth() === month){
+      if (!best || d > best) best = d;
+    }
+  });
+  return best;
+}
+
+/* Constrói a data de referência para o MTD (override, última com dados, ou hoje) */
+function resolveMTDRefDate_(rows, tz){
+  const override = (_bagyProp_('BAGY_MTD_REF') || BAGY_MTD_REF_DEFAULT).trim();
+  const today = new Date();
+
+  if (override){
+    const s = override;
+
+    // YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)){
+      const y = +s.slice(0,4), m = +s.slice(5,7)-1, d = +s.slice(8,10);
+      return new Date(y, m, d);
+    }
+
+    // YYYY-MM
+    if (/^\d{4}-\d{2}$/.test(s)){
+      const y = +s.slice(0,4), m = +s.slice(5,7)-1;
+      const lastInMonth = lastDataInMonth_(rows, y, m);
+      if (lastInMonth) return lastInMonth;
+      // fallback: último dia do mês
+      return new Date(y, m+1, 0);
+    }
+  }
+
+  // automático: usa última data com dados (se houver), senão hoje
+  const last = lastDataDate_(rows);
+  return last || today;
+}
+
+function daysInMonth_(d){
+  return new Date(d.getFullYear(), d.getMonth()+1, 0).getDate();
+}
+
+/* ====== MTD vs M-1 MTD (apenas Bagy) ====== */
+function runBagyMTDOverview_(){
+  const metrics = buildBagyMTDOverview_();
+  writeBagyMTDOverviewSheet_(metrics);
+  SpreadsheetApp.getUi().alert('BAGY MTD gerado/atualizado com sucesso.');
+}
+
+function buildBagyMTDOverview_(){
+  const tz = (typeof AC_TZ!=='undefined' ? AC_TZ : Session.getScriptTimeZone() || 'America/Sao_Paulo');
+  const {rows, nome} = loadMestre_BAGY_();
+
+  const ref    = resolveMTDRefDate_(rows, tz);
+  const refDay = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate());
+
+  const startCurr = new Date(refDay.getFullYear(), refDay.getMonth(), 1);
+  const endCurr   = refDay;
+
+  const prevMonth = new Date(refDay.getFullYear(), refDay.getMonth()-1, 1);
+  const endPrev   = new Date(
+    prevMonth.getFullYear(),
+    prevMonth.getMonth(),
+    Math.min(refDay.getDate(), daysInMonth_(prevMonth))
+  );
+  const startPrev = new Date(prevMonth.getFullYear(), prevMonth.getMonth(), 1);
+
+  const name = (typeof CLIENT_NAME!=='undefined' && CLIENT_NAME
+    ? CLIENT_NAME
+    : (nome || SpreadsheetApp.getActive().getName())
+  ).toString();
+
+  const invA  = sumWindowBR_(rows, "inv",  startCurr, endCurr);
+  const invP  = sumWindowBR_(rows, "inv",  startPrev, endPrev);
+
+  const recA  = sumWindowBR_(rows, "paga", startCurr, endCurr);
+  const recP  = sumWindowBR_(rows, "paga", startPrev, endPrev);
+
+  const pedA  = sumWindowBR_(rows, "ped",  startCurr, endCurr);
+  const pedP  = sumWindowBR_(rows, "ped",  startPrev, endPrev);
+
+  const npvA  = sumWindowBR_(rows, "npv",  startCurr, endCurr);
+  const npvP  = sumWindowBR_(rows, "npv",  startPrev, endPrev);
+
+  const totValA = recA + npvA;
+  const totValP = recP + npvP;
+
+  const aprA = ratioSafe_(recA, totValA);
+  const aprP = ratioSafe_(recP, totValP);
+
+  const roasA = ratioSafe_(recA, invA);
+  const roasP = ratioSafe_(recP, invP);
+
+  const cpaA  = ratioSafe_(invA, pedA);
+  const cpaP  = ratioSafe_(invP, pedP);
+
+  const tktA  = ratioSafe_(recA, pedA);
+  const tktP  = ratioSafe_(recP, pedP);
+
+  const vInv = varPct_(invA, invP);
+  const vTot = varPct_(totValA, totValP);
+  const vPed = varPct_(pedA, pedP);
+  const vRec = varPct_(recA, recP);
+  const vNpv = varPct_(npvA, npvP);
+
+  // mensagem simples
+  let msg = '';
+  if (vTot > 0.05 && vRec > 0.05) msg = 'Boa! Crescimento de receita e volume.';
+  else if (vTot < -0.05) msg = 'Atenção: queda no total (pagos + não pagos).';
+  else msg = 'Estável: pequenas variações no MTD.';
+
+  return {
+    nome: name,
+    periodo: { startCurr, endCurr, startPrev, endPrev },
+    investimento: { atual: invA, prev: invP, var: vInv },
+    pedidosAprov: { atual: pedA, prev: pedP, var: vPed },
+    receitaAprov: { atual: recA, prev: recP, var: vRec },
+    receitaTotal: { atual: totValA, prev: totValP, var: vTot },
+    expiradosVal: { atual: npvA, prev: npvP, var: vNpv },
+    aprovacaoVal: { atual: aprA, prev: aprP },
+    roas: { atual: roasA, prev: roasP },
+    cpa: { atual: cpaA, prev: cpaP },
+    ticket: { atual: tktA, prev: tktP },
+    mensagem: msg
+  };
+}
+
+function writeBagyMTDOverviewSheet_(metrics){
+  const ss = SpreadsheetApp.getActive();
+  const shName = 'BAGY_MTD';
+  const sh = ss.getSheetByName(shName) || ss.insertSheet(shName);
+
+  // limpa só área usada
+  sh.clear({contentsOnly:true});
+
+  const name = metrics.nome || ss.getName();
+  const {startCurr, endCurr, startPrev, endPrev} = metrics.periodo;
+
+  sh.getRange(1,1,1,12).setValues([[
+    "Conta",
+    "Período",
+    "Investimento (A/P)",
+    "Pedidos Pagos (A/P)",
+    "Receita Paga (A/P)",
+    "Receita Total (A/P)",
+    "Não Pagos (A/P)",
+    "Aprovação % (A/P)",
+    "ROAS (A/P)",
+    "CPA (A/P)",
+    "Ticket (A/P)",
+    "Mensagem"
+  ]]).setFontWeight("bold");
+
+  const periodoStr =
+    fmtDDMM_(startCurr) + '–' + fmtDDMM_(endCurr) +
+    ' (vs. ' + fmtDDMM_(startPrev) + '–' + fmtDDMM_(endPrev) + ')';
+
+  const row = [[
+    name, periodoStr,
+    money_(metrics.investimento.atual) + ' / ' + money_(metrics.investimento.prev),
+    int_(metrics.pedidosAprov.atual) + ' / ' + int_(metrics.pedidosAprov.prev),
+    money_(metrics.receitaAprov.atual) + ' / ' + money_(metrics.receitaAprov.prev),
+    money_(metrics.receitaTotal.atual) + ' / ' + money_(metrics.receitaTotal.prev),
+    money_(metrics.expiradosVal.atual) + ' / ' + money_(metrics.expiradosVal.prev),
+    pct_(metrics.aprovacaoVal.atual) + ' / ' + pct_(metrics.aprovacaoVal.prev),
+    metrics.roas.atual.toFixed(2) + 'x / ' + metrics.roas.prev.toFixed(2) + 'x',
+    money_(metrics.cpa.atual) + ' / ' + money_(metrics.cpa.prev),
+    money_(metrics.ticket.atual) + ' / ' + money_(metrics.ticket.prev),
+    metrics.mensagem
+  ]];
+
+  sh.getRange(2,1,1,row[0].length).setValues(row);
+  sh.autoResizeColumns(1,12);
+}
+
+/* ====== RESUMO_BAGY_MENSAL (colunas lado a lado para Looker) ====== */
+function buildBagyMonthlyRollup_(){
+  const tz = (typeof AC_TZ!=='undefined'
+              ? AC_TZ
+              : Session.getScriptTimeZone() || 'America/Sao_Paulo');
+
+  const {rows: dataRows, nome} = loadMestre_BAGY_();
+  const name = (typeof CLIENT_NAME!=='undefined' && CLIENT_NAME
+    ? CLIENT_NAME
+    : (nome || SpreadsheetApp.getActive().getName())
+  ).toString();
+
+  // Início do mensal: BAGY_START_DATE (Script Properties) > default > primeira data com dados
+  const startISO = (_bagyProp_('BAGY_START_DATE') || BAGY_START_DATE_DEFAULT).trim();
+  let start = null;
+
+  if (startISO && /^\d{4}-\d{2}-\d{2}$/.test(startISO)){
+    start = new Date(+startISO.slice(0,4), +startISO.slice(5,7)-1, 1);
+  }else{
+    start = firstDataDate_(dataRows) || new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    start = new Date(start.getFullYear(), start.getMonth(), 1);
+  }
+
+  const today = new Date();
+  const end = new Date(today.getFullYear(), today.getMonth(), 1); // mês atual (começo)
+
+  const months = [];
+  for (let d = new Date(start.getFullYear(), start.getMonth(), 1); d <= end; d = new Date(d.getFullYear(), d.getMonth()+1, 1)){
+    months.push(new Date(d.getFullYear(), d.getMonth(), 1));
+  }
+
+  const out = [];
+  months.forEach(m0=>{
+    const m1 = new Date(m0.getFullYear(), m0.getMonth()+1, 0);
+    const inv  = sumWindowBR_(dataRows, "inv",  m0, m1);
+    const paga = sumWindowBR_(dataRows, "paga", m0, m1);
+    const ped  = sumWindowBR_(dataRows, "ped",  m0, m1);
+    const npv  = sumWindowBR_(dataRows, "npv",  m0, m1);
+
+    const totalVal = paga + npv;
+    const aprovPct = ratioSafe_(paga, totalVal);
+    const roas = ratioSafe_(paga, inv);
+    const cpa  = ratioSafe_(inv, ped);
+    const tkt  = ratioSafe_(paga, ped);
+
+    out.push({
+      conta: name,
+      mes: Utilities.formatDate(m0, tz, "yyyy-MM"),
+      investimento: inv,
+      receita_paga: paga,
+      pedidos_pagos: ped,
+      nao_pagos: npv,
+      receita_total: totalVal,
+      aprovacao_pct: aprovPct,
+      roas: roas,
+      cpa: cpa,
+      ticket: tkt
+    });
+  });
+
+  writeBagyMonthlyRollupSheet_(out);
+  SpreadsheetApp.getUi().alert('RESUMO_BAGY_MENSAL gerado/atualizado com sucesso.');
+}
+
+function writeBagyMonthlyRollupSheet_(rows){
+  const ss = SpreadsheetApp.getActive();
+  const shName = 'RESUMO_BAGY_MENSAL';
+  const sh = ss.getSheetByName(shName) || ss.insertSheet(shName);
+
+  sh.clear({contentsOnly:true});
+
+  const header = [
+    "Conta",
+    "Mês (YYYY-MM)",
+    "Investimento (R$)",
+    "Receita Paga (R$)",
+    "Pedidos Pagos",
+    "Não Pagos (R$)",
+    "Receita Total (R$)",
+    "Aprovação (%)",
+    "ROAS",
+    "CPA (R$)",
+    "Ticket (R$)"
+  ];
+
+  sh.getRange(1,1,1,header.length).setValues([header]).setFontWeight(true);
+
+  const values = rows.map(r=>[
+    r.conta,
+    r.mes,
+    r.investimento,
+    r.receita_paga,
+    r.pedidos_pagos,
+    r.nao_pagos,
+    r.receita_total,
+    r.aprovacao_pct,
+    r.roas,
+    r.cpa,
+    r.ticket
+  ]);
+
+  if (values.length){
+    sh.getRange(2,1,values.length,header.length).setValues(values);
+  }
+
+  // formatos
+  sh.getRange(2,3,Math.max(values.length,1),1).setNumberFormat('"R$" #,##0.00');
+  sh.getRange(2,4,Math.max(values.length,1),1).setNumberFormat('"R$" #,##0.00');
+  sh.getRange(2,6,Math.max(values.length,1),1).setNumberFormat('"R$" #,##0.00');
+  sh.getRange(2,7,Math.max(values.length,1),1).setNumberFormat('"R$" #,##0.00');
+  sh.getRange(2,8,Math.max(values.length,1),1).setNumberFormat('0.00%');
+  sh.getRange(2,9,Math.max(values.length,1),1).setNumberFormat('0.00');
+  sh.getRange(2,10,Math.max(values.length,1),1).setNumberFormat('"R$" #,##0.00');
+  sh.getRange(2,11,Math.max(values.length,1),1).setNumberFormat('"R$" #,##0.00');
+
+  sh.autoResizeColumns(1, header.length);
+}
+
+/* ===================== Leitura da MESTRE (Bagy view) =====================
+   Depende dos helpers: norm_, findCol_, toNumber_, parseDate_
+   (abaixo estão os helpers usados pelo bagy.gs) */
+function loadMestre_BAGY_(){
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName("MESTRE");
+  if (!sh) throw new Error('Aba "MESTRE" não encontrada.');
+
+  const vals = sh.getDataRange().getDisplayValues();
+  if (vals.length < 2) return {rows: [], nome: ss.getName()};
+
+  const H = vals[0].map(norm_);
+
+  const iData   = findCol_(H, ["data","date"]);
+  const iInv    = findCol_(H, ["total (r$)","investimento","gasto total (r$)","ads total (r$)"]);
+  const iFb     = findCol_(H, ["facebook (r$)","meta (r$)","meta ads (r$)","facebook ads (r$)"]);
+  const iPaga   = findCol_(H, ["receita paga bagy (r$)","receita pedidos pagos (r$)","faturamento (r$)","faturamento loja (r$)"]);
+  const iPed    = findCol_(H, ["pedidos pagos bagy","pedidos pagos","pedidos"]);
+  const iNaoPag = findCol_(H, ["não pagos bagy (r$)","nao pagos bagy (r$)","expirados (r$)","nao pagos (r$)"]);
+  const iNome   = findCol_(H, ["conta id","conta","nome da conta","account name","propriedade/valor"]);
+
+  if (iData === -1) throw new Error('Coluna "Data" não encontrada na MESTRE.');
+
+  const rows = vals.slice(1).map(r=>{
+    return {
+      data: r[iData],
+      inv:  (iInv!==-1 ? r[iInv] : (iFb!==-1 ? r[iFb] : 0)),
+      paga: (iPaga!==-1 ? r[iPaga] : 0),
+      ped:  (iPed!==-1 ? r[iPed] : 0),
+      npv:  (iNaoPag!==-1 ? r[iNaoPag] : 0),
+      nome: (iNome!==-1 ? r[iNome] : "")
+    };
+  });
+
+  const nome = (rows.find(r=>String(r.nome||"").trim())?.nome || ss.getName()).trim();
+  return {rows, nome};
+}
+
+/* ===== Helpers Bagy ===== */
+function norm_(s){
+  return String(s||"")
+    .trim()
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+}
+
+function findCol_(Hnorm, candidates){
+  for (const c of candidates){
+    const idx = Hnorm.indexOf(norm_(c));
+    if (idx !== -1) return idx;
+  }
+  return -1;
+}
+
+// aceita "R$ 1.234,56", "1234.56", "(1.234,56)"
+function toNumber_(v){
+  if (typeof v === 'number') return isFinite(v) ? v : 0;
+  let s = String(v||'').trim();
+  if (!s) return 0;
+  let negative = /^\(.*\)$/.test(s);
+  if (negative) s = s.replace(/[()]/g, '');
+  s = s.replace(/\s/g,'').replace('R$','').replace('r$','');
+
+  if (/^\d{1,3}(\.\d{3})*,\d{2}$/.test(s)) {
+    s = s.replace(/\./g, '').replace(',', '.');
+  } else if (/^\d{1,3}(,\d{3})*\.\d{2}$/.test(s)) {
+    s = s.replace(/,/g, '');
+  } else {
+    if (s.indexOf(',') >= 0 && s.indexOf('.') === -1) {
+      s = s.replace(/\./g, '').replace(',', '.');
+    } else {
+      s = s.replace(/(?<=\d)[,](?=\d{3}\b)/g, '');
+    }
+  }
+
+  let n = Number(s);
+  if (isNaN(n)) return 0;
+  if (negative) n = -Math.abs(n);
+  return n;
+}
+
+function parseDate_(v){
+  if (!v) return null;
+  if (Object.prototype.toString.call(v) === '[object Date]') return v;
+
+  const s = String(v).trim();
+
+  // dd/mm/yyyy
+  const m1 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m1){
+    const d = +m1[1], m = +m1[2]-1, y = +m1[3];
+    const dt = new Date(y,m,d);
+    return isNaN(dt.getTime()) ? null : dt;
+  }
+
+  // yyyy-mm-dd
+  const m2 = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m2){
+    const y = +m2[1], m = +m2[2]-1, d = +m2[3];
+    const dt = new Date(y,m,d);
+    return isNaN(dt.getTime()) ? null : dt;
+  }
+
+  const dt = new Date(s);
+  return isNaN(dt.getTime()) ? null : dt;
+}
+
+function sumWindowBR_(rows, key, start, end){
+  let sum = 0;
+  rows.forEach(r=>{
+    const d = parseDate_(r.data);
+    if (!d) return;
+    if (d >= start && d <= end){
+      sum += toNumber_(r[key]);
+    }
+  });
+  return sum;
+}
+
+function firstDataDate_(rows){
+  let best = null;
+  rows.forEach(r=>{
+    const d = parseDate_(r.data);
+    if (d && (!best || d < best)) best = d;
+  });
+  return best;
+}
+
+function ratioSafe_(a,b){
+  a = toNumber_(a); b = toNumber_(b);
+  return b ? (a/b) : 0;
+}
+
+function varPct_(a,b){
+  a = toNumber_(a); b = toNumber_(b);
+  if (!b) return a ? 1 : 0;
+  return (a-b)/Math.abs(b);
+}
+
+function money_(n){
+  n = toNumber_(n);
+  return n.toLocaleString('pt-BR', {style:'currency', currency:'BRL'});
+}
+
+function int_(n){
+  n = toNumber_(n);
+  return Math.round(n).toLocaleString('pt-BR');
+}
+
+function pct_(n){
+  n = toNumber_(n);
+  return (n*100).toFixed(2).replace('.',',') + '%';
+}
+
+function fmtDDMM_(d){
+  const dd = String(d.getDate()).padStart(2,'0');
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  return `${dd}/${mm}`;
+}
