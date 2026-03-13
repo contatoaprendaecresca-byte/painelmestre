@@ -1,0 +1,366 @@
+/**
+ * WeeklyReport.gs — Módulo isolado (não interfere nos existentes)
+ * Gera/atualiza a aba "DESEMPENHO_SEMANAL" com agregação semanal a partir de 01/01/2026.
+ *
+ * ✅ Semana (agrupamento): DOMINGO → SÁBADO
+ * ✅ Coluna ISO Ano-Semana (ISO-8601: SEG → DOM) + ISO Semana (nº)
+ * ✅ Saída com APENAS as colunas do seu print:
+ *    ISO Ano-Semana | Invest Total | Sessões GA4 | Compras | Receita | ROAS | CPA | CPS
+ *
+ * ✅ Não altera seu menu (mantém os mesmos handlers WEEKLY_ já usados no Menu.gs)
+ */
+
+const WEEKLY_CFG = {
+  START_DATE: new Date('2026-01-01T00:00:00'),
+  SOURCE_SHEET: 'MESTRE',
+  TARGET_SHEET: 'DESEMPENHO_SEMANAL',
+  TZ: 'America/Sao_Paulo',
+
+  // Cabeçalhos esperados (o script encontra por nome; se não existir, ele ignora a métrica)
+  HEADERS: {
+    date: ['Data', 'DATE', 'day', 'Dia'],
+
+    // Só precisamos do TOTAL. Se não existir, faz fallback: meta + google
+    totalSpend: ['Invest Total (R$)', 'Invest Total', 'Total Spend', 'Investimento Total', 'Gasto Total', 'Total (R$)'],
+    metaSpend: ['Invest Meta (R$)', 'Facebook (R$)', 'Facebook Spend', 'Meta Spend', 'Investimento Meta', 'Gasto Meta', 'Meta (R$)'],
+    googleSpend: ['Invest Google (R$)', 'Google Ads Spend', 'Investimento Google', 'Gasto Google', 'Google (R$)'],
+
+    sessions: ['Sessões GA4', 'Sessoes GA4', 'Sessions GA4', 'Sessions'],
+    purchase: ['Compras', 'Purchase', 'Pedidos Pagos', 'Paid', 'Pagos'],
+    revenue: ['Receita (R$)', 'Receita', 'Revenue', 'Faturamento', 'Vendas', 'Receita Paga Bagy (R$)']
+  },
+
+  // Saída EXATA do seu print
+  OUTPUT_HEADERS: [
+    'ISO Ano-Semana',
+    'Invest Total (R$)',
+    'Sessões GA4',
+    'Compras',
+    'Receita (R$)',
+    'ROAS (Receita/Invest Total)',
+    'CPA (Invest Total/Compras)',
+    'CPS (Invest Total/Sessões)'
+  ]
+};
+
+/** =========================
+ *  MENU HANDLERS (não mexer no menu)
+ *  ========================= */
+
+/** Rebuild completo desde 01/01/2026 */
+function WEEKLY_buildFullFrom_2026_01_01() {
+  WEEKLY_build_(WEEKLY_CFG.START_DATE, new Date());
+  SpreadsheetApp.getUi().alert('✅ DESEMPENHO_SEMANAL atualizado (full desde 01/01/2026).');
+}
+
+/** Atualiza só as últimas 12 semanas (com buffer) */
+function WEEKLY_updateLast12Weeks() {
+  const today = new Date();
+  const start = WEEKLY_addDays_(today, -7 * 12 - 14); // buffer 2 semanas
+  WEEKLY_build_(start, today);
+  SpreadsheetApp.getUi().alert('✅ DESEMPENHO_SEMANAL atualizado (últimas 12 semanas).');
+}
+
+/** Instala trigger semanal: toda segunda 06:50 (SP) */
+function WEEKLY_installWeeklyTrigger() {
+  WEEKLY_removeWeeklyTrigger(); // idempotente
+
+  ScriptApp.newTrigger('WEEKLY_updateLast12Weeks')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.MONDAY)
+    .atHour(6)
+    .nearMinute(50)
+    .create();
+
+  SpreadsheetApp.getUi().alert('⏰ Trigger semanal instalado: segunda 06:50 (atualiza últimas 12 semanas).');
+}
+
+/** Remove triggers deste módulo */
+function WEEKLY_removeWeeklyTrigger() {
+  const fns = new Set(['WEEKLY_updateLast12Weeks']);
+  const toDelete = ScriptApp.getProjectTriggers().filter(t => fns.has(t.getHandlerFunction()));
+  toDelete.forEach(t => ScriptApp.deleteTrigger(t));
+}
+
+/** Lista triggers relacionados ao módulo semanal */
+function WEEKLY_listWeeklyTriggers() {
+  const triggers = ScriptApp.getProjectTriggers()
+    .filter(t => ['WEEKLY_updateLast12Weeks'].includes(t.getHandlerFunction()));
+
+  const lines = triggers.map(t => `• ${t.getHandlerFunction()} | CLOCK | ${t.getEventType()}`);
+  SpreadsheetApp.getUi().alert('🧾 Triggers (Semanal):\n\n' + (lines.length ? lines.join('\n') : 'Nenhum.'));
+}
+
+/** =========================
+ *  CORE
+ *  ========================= */
+
+function WEEKLY_build_(dateMin, dateMax) {
+  const ss = SpreadsheetApp.getActive();
+  const src = ss.getSheetByName(WEEKLY_CFG.SOURCE_SHEET);
+  if (!src) throw new Error(`Aba fonte "${WEEKLY_CFG.SOURCE_SHEET}" não encontrada.`);
+
+  const data = src.getDataRange().getValues();
+  if (data.length < 2) return;
+
+  const headers = data[0].map(h => String(h || '').trim());
+  const idx = WEEKLY_indexMap_(headers);
+
+  const rows = data.slice(1);
+  const byWeek = new Map();
+
+  for (const r of rows) {
+    const d = WEEKLY_readDate_(r, idx.date);
+    if (!d) continue;
+
+    // janela
+    if (d < dateMin || d > dateMax) continue;
+    if (d < WEEKLY_CFG.START_DATE) continue;
+
+    // Agrupamento DOM→SÁB
+    const weekStart = WEEKLY_startOfWeek_Sun_(d); // domingo
+    const key = WEEKLY_weekKey_SunSat_(weekStart);
+
+    if (!byWeek.has(key)) {
+      // ISO do "meio" da semana (quinta-feira) para evitar bordas/viradas
+      const iso = WEEKLY_isoYearWeek_(WEEKLY_addDays_(weekStart, 4)); // quinta
+      byWeek.set(key, {
+        weekStart,
+        key,
+        isoYearWeek: iso.yearWeek,
+        isoWeekNo: iso.week,
+        totalSpend: 0,
+        sessions: 0,
+        purchase: 0,
+        revenue: 0
+      });
+    }
+
+    const agg = byWeek.get(key);
+
+    // Spend: prioriza Total; se não existir, soma meta+google
+    let total = WEEKLY_num_(r, idx.totalSpend);
+    if (!total || total === 0) {
+      total = WEEKLY_num_(r, idx.metaSpend) + WEEKLY_num_(r, idx.googleSpend);
+    }
+    agg.totalSpend += total;
+
+    agg.sessions += WEEKLY_num_(r, idx.sessions);
+    agg.purchase += WEEKLY_num_(r, idx.purchase);
+    agg.revenue  += WEEKLY_num_(r, idx.revenue);
+  }
+
+  // monta saída ordenada
+  const out = [];
+  const items = Array.from(byWeek.values()).sort((a, b) => a.weekStart - b.weekStart);
+
+  for (const a of items) {
+    const roas = a.totalSpend > 0 ? (a.revenue / a.totalSpend) : 0;
+    const cpa  = a.purchase > 0 ? (a.totalSpend / a.purchase) : 0;
+    const cps  = a.sessions > 0 ? (a.totalSpend / a.sessions) : 0;
+
+    out.push([
+      a.isoYearWeek,                // ISO Ano-Semana (col A)
+      WEEKLY_round2_(a.totalSpend), // Invest Total
+      Math.round(a.sessions),       // Sessões
+      Math.round(a.purchase),       // Compras
+      WEEKLY_round2_(a.revenue),    // Receita
+      WEEKLY_round2_(roas),         // ROAS
+      WEEKLY_round2_(cpa),          // CPA
+      WEEKLY_round2_(cps)           // CPS (no print parece 2 casas)
+    ]);
+  }
+
+  WEEKLY_writeOutput_(out, dateMin, dateMax);
+}
+
+function WEEKLY_writeOutput_(rows, dateMin, dateMax) {
+  const ss = SpreadsheetApp.getActive();
+  let sh = ss.getSheetByName(WEEKLY_CFG.TARGET_SHEET);
+  if (!sh) sh = ss.insertSheet(WEEKLY_CFG.TARGET_SHEET);
+
+  sh.clear();
+
+  // Linha START como no seu print
+  sh.getRange(1, 1).setValue(`START: ${WEEKLY_fmtDate_(WEEKLY_CFG.START_DATE)}`).setFontWeight('bold');
+
+  // Cabeçalho
+  sh.getRange(3, 1, 1, WEEKLY_CFG.OUTPUT_HEADERS.length)
+    .setValues([WEEKLY_CFG.OUTPUT_HEADERS])
+    .setFontWeight('bold');
+
+  // Dados
+  if (rows.length) {
+    sh.getRange(4, 1, rows.length, WEEKLY_CFG.OUTPUT_HEADERS.length).setValues(rows);
+  }
+
+  sh.setFrozenRows(3);
+  sh.autoResizeColumns(1, WEEKLY_CFG.OUTPUT_HEADERS.length);
+
+  // Formatação
+  const nRows = Math.max(1, rows.length);
+
+  // Dinheiro: Invest Total (B) e Receita (E)
+  [2, 5].forEach(c => {
+    sh.getRange(4, c, nRows, 1).setNumberFormat('"R$" #,##0.00');
+  });
+
+  // ROAS (F)
+  sh.getRange(4, 6, nRows, 1).setNumberFormat('0.00');
+
+  // CPA (G) e CPS (H)
+  sh.getRange(4, 7, nRows, 1).setNumberFormat('"R$" #,##0.00');
+  sh.getRange(4, 8, nRows, 1).setNumberFormat('"R$" #,##0.00');
+}
+
+/** =========================
+ *  HELPERS (isolados)
+ *  ========================= */
+
+function WEEKLY_indexMap_(headers) {
+  const find = (alts) => {
+    for (const a of alts) {
+      const idx = headers.findIndex(h => String(h).toLowerCase() === String(a).toLowerCase());
+      if (idx >= 0) return idx;
+    }
+    for (const a of alts) {
+      const idx = headers.findIndex(h => String(h).toLowerCase().includes(String(a).toLowerCase()));
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  };
+
+  const m = {
+    date: find(WEEKLY_CFG.HEADERS.date),
+    totalSpend: find(WEEKLY_CFG.HEADERS.totalSpend),
+    metaSpend: find(WEEKLY_CFG.HEADERS.metaSpend),
+    googleSpend: find(WEEKLY_CFG.HEADERS.googleSpend),
+    sessions: find(WEEKLY_CFG.HEADERS.sessions),
+    purchase: find(WEEKLY_CFG.HEADERS.purchase),
+    revenue: find(WEEKLY_CFG.HEADERS.revenue)
+  };
+
+  if (m.date < 0) {
+    throw new Error('Não achei a coluna de Data na MESTRE. Ajuste o WEEKLY_CFG.HEADERS.date ou o cabeçalho na planilha.');
+  }
+  return m;
+}
+
+function WEEKLY_readDate_(row, dateIdx) {
+  if (dateIdx < 0) return null;
+  const v = row[dateIdx];
+  if (!v) return null;
+
+  // Date
+  if (Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v.getTime())) {
+    return new Date(v.getFullYear(), v.getMonth(), v.getDate());
+  }
+
+  // dd/mm/aaaa
+  const s = String(v).trim();
+  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (m) {
+    const dd = Number(m[1]), mm = Number(m[2]) - 1, yyyy = Number(m[3]);
+    const d = new Date(yyyy, mm, dd);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // fallback
+  const d2 = new Date(s);
+  return isNaN(d2.getTime()) ? null : new Date(d2.getFullYear(), d2.getMonth(), d2.getDate());
+}
+
+function WEEKLY_num_(row, idx) {
+  if (idx < 0) return 0;
+  const v = row[idx];
+  if (v === null || v === '' || typeof v === 'undefined') return 0;
+
+  if (typeof v === 'number') return isNaN(v) ? 0 : v;
+
+  let s = String(v).trim();
+  s = s.replace(/\s+/g, '');
+  s = s.replace(/[^\d,.\-]/g, '');
+  if (!s) return 0;
+
+  const hasComma = s.includes(',');
+  const hasDot = s.includes('.');
+
+  if (hasComma && hasDot) {
+    if (s.lastIndexOf(',') > s.lastIndexOf('.')) {
+      s = s.replace(/\./g, '').replace(',', '.');
+    } else {
+      s = s.replace(/,/g, '');
+    }
+  } else if (hasComma && !hasDot) {
+    s = s.replace(',', '.');
+  }
+
+  const n = Number(s);
+  return isNaN(n) ? 0 : n;
+}
+
+/** Semana DOM→SÁB: retorna o domingo */
+function WEEKLY_startOfWeek_Sun_(date) {
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const day = d.getDay(); // 0 dom ... 6 sab
+  d.setDate(d.getDate() - day);
+  return d;
+}
+
+/** Chave DOM→SÁB: YYYY-ww (contagem por domingos) */
+function WEEKLY_weekKey_SunSat_(weekStartSun) {
+  const y = weekStartSun.getFullYear();
+  const jan1 = new Date(y, 0, 1);
+  const firstSun = WEEKLY_startOfWeek_Sun_(jan1);
+
+  const diffDays = Math.round((weekStartSun - firstSun) / (24 * 3600 * 1000));
+  const weekNo = 1 + Math.floor(diffDays / 7);
+
+  return `${y}-${String(weekNo).padStart(2, '0')}`;
+}
+
+/**
+ * ISO week (ISO-8601): semana começa na segunda.
+ * Retorna { year, week, yearWeek } (ex: 2026-05)
+ */
+function WEEKLY_isoYearWeek_(date) {
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
+  let day = d.getDay();
+  if (day === 0) day = 7; // domingo -> 7
+
+  // vai para quinta
+  d.setDate(d.getDate() + (4 - day));
+
+  const isoYear = d.getFullYear();
+
+  const jan4 = new Date(isoYear, 0, 4);
+  let jan4Day = jan4.getDay();
+  if (jan4Day === 0) jan4Day = 7;
+
+  const jan4Thu = new Date(jan4);
+  jan4Thu.setDate(jan4Thu.getDate() + (4 - jan4Day));
+
+  const diff = d - jan4Thu;
+  const week = 1 + Math.round(diff / (7 * 24 * 3600 * 1000));
+
+  return {
+    year: isoYear,
+    week,
+    yearWeek: `${isoYear}-${String(week).padStart(2, '0')}`
+  };
+}
+
+function WEEKLY_addDays_(d, days) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  x.setDate(x.getDate() + days);
+  return x;
+}
+
+function WEEKLY_fmtDate_(d) {
+  return Utilities.formatDate(d, WEEKLY_CFG.TZ, 'dd/MM/yyyy');
+}
+
+function WEEKLY_round2_(n) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
