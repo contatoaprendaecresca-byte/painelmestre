@@ -1,236 +1,808 @@
-/**
- * Dashboard.gs
- * Web App, Endpoints e Cache.
+/*
+ * Dashboard.gs — WebApp + Cache (MESTRE -> cache)
  */
 
+/* ===================== (OPCIONAL) TOKEN PARA EMBED =====================
+ * 1) Em "Project Settings" > "Script properties":
+ *    - DASH_ACCESS_TOKEN = (uma senha forte)
+ *
+ * 2) Se você NÃO quiser token, deixe a propriedade vazia.
+ */
 const DASH_ACCESS_TOKEN = (PropertiesService.getScriptProperties().getProperty('DASH_ACCESS_TOKEN') || '').trim();
+
+/* ===================== CONFIG DASH ===================== */
 const DASH_CFG = {
   SOURCE_SHEET_NAME: 'MESTRE',
   HEADER_ROW: 1,
   DATE_HEADER: 'Data',
+
   COL_CANDIDATES: {
+    // Conta/ID (para chave estável no cache)
     account: ['Conta ID', 'Account ID', 'Conta', 'Cliente'],
+
+    // Investimento
     metaSpend:  ['Facebook (R$)', 'Meta (R$)', 'Valor usado', 'Investimento Meta (R$)'],
     googleSpend:['Google Ads (R$)', 'Google (R$)', 'Investimento Google (R$)'],
     totalSpend: ['Total (R$)', 'Investimento', 'Investimento (R$)'],
-    spend:      ['Total (R$)', 'Investimento', 'Investimento (R$)'], // Atalho
+
+    // Atalhos (usados no metaWrite do sync)
+    spend:      ['Total (R$)', 'Investimento', 'Investimento (R$)'],
+
+    // Funil
     cart:       ['Cart', 'ATC', 'Adições ao carrinho', 'Adds to cart'],
     checkout:   ['Checkout', 'InitiateCheckout', 'Finalizações de compra'],
     infoPay:    ['Info. Pagamento', 'Info Pagamento', 'AddPaymentInfo'],
     purchase:   ['purshase', 'purchase', 'Compras', 'Pedidos Pagos Bagy', 'Transações GA4', 'Pedidos'],
+
+    // GA4
     sessions:     ['Sessões GA4', 'Sessoes GA4', 'Sessões', 'Sessions'],
     transactions: ['Transações GA4', 'Transacoes GA4', 'Transactions'],
+
+    // Receita
     revenuePaid:   ['Receita Paga Bagy (R$)', 'Receita Paga (R$)'],
     revenueUnpaid: ['Não Pagos Bagy (R$)', 'Nao Pagos Bagy (R$)'],
     revenueAny:    ['Receita Captada GA4 (R$)', 'Receita Bruta', 'Receita', 'Faturamento'],
-    revenue:       ['Receita Paga Bagy (R$)', 'Receita Captada GA4 (R$)', 'Receita', 'Faturamento'],
-    purchases:     ['purshase', 'purchase', 'Compras', 'Pedidos Pagos Bagy', 'Transações GA4', 'Pedidos']
+
+    // Atalho (meta)
+    revenue: ['Receita Paga Bagy (R$)', 'Receita Captada GA4 (R$)', 'Receita', 'Faturamento'],
+    purchases: ['purshase', 'purchase', 'Compras', 'Pedidos Pagos Bagy', 'Transações GA4', 'Pedidos']
   }
 };
 
+/* ===================== CONFIG CACHE ===================== */
 const DASH_CACHE = {
   ENABLED: true,
+
+  // RAW copy da MESTRE (sem fórmulas) — somente 180 dias até ontem
   SHEET_DAILY: '_AEC_DASH_CACHE_DAILY',
   SHEET_META:  '_AEC_DASH_CACHE_META',
   SHEET_HIST:  '_AEC_DASH_CACHE_HIST',
+
   WINDOW_DAYS: 180,
   EXCLUDE_TODAY: true,
+
   TRIGGER_FN: 'DASH_CACHE_SYNC',
   TRIGGER_HOUR: 6
 };
 
-// === WEBAPP ===
+/* ===================== WEBAPP (WordPress iFrame) ===================== */
 function doGet(e) {
+  // Token opcional: se configurado, exige ?t=TOKEN
   if (DASH_ACCESS_TOKEN) {
     const t = (e && e.parameter && e.parameter.t) ? String(e.parameter.t).trim() : '';
     if (t !== DASH_ACCESS_TOKEN) {
-      return HtmlService.createHtmlOutput('Acesso negado. Token inválido.');
+      return HtmlService.createHtmlOutput(
+        '<!doctype html><meta charset="utf-8">' +
+        '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+        '<title>Acesso negado</title>' +
+        '<style>body{margin:0;background:#07070a;color:#fff;font-family:system-ui;padding:24px}'+
+        '.card{max-width:560px;margin:0 auto;background:#101018;border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:16px}'+
+        'h1{margin:0 0 8px 0;font-size:16px}p{margin:0;color:rgba(255,255,255,.7)}'+
+        '</style>'+
+        '<div class="card"><h1>Acesso negado</h1><p>Token inválido ou ausente.</p></div>'
+      ).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
     }
   }
+
   const tpl = HtmlService.createTemplateFromFile('index');
+  // Injeta token no front (se existir)
   tpl.APP_TOKEN_FROM_SERVER = DASH_ACCESS_TOKEN || '';
-  return tpl.evaluate().setTitle('AEC – Relatório').setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+
+  return tpl.evaluate()
+    .setTitle('AEC – Relatório por Período')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
+/* Modal interno (opcional) */
 function showDashboard_() {
   const tpl = HtmlService.createTemplateFromFile('index');
   tpl.APP_TOKEN_FROM_SERVER = DASH_ACCESS_TOKEN || '';
-  const html = tpl.evaluate().setTitle('AEC – Painel').setWidth(1100).setHeight(720);
+
+  const html = tpl.evaluate()
+    .setTitle('AEC – Relatório por Período')
+    .setWidth(1100)
+    .setHeight(720)
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+
   SpreadsheetApp.getUi().showModalDialog(html, 'AEC – Relatório por Período');
 }
 
-// === ENDPOINTS DO FRONT ===
+/* ===================== ENDPOINTS (front chama por google.script.run) ===================== */
 function getDashboardDefaults() {
   const cache = _dashGetCacheFull_();
-  const today = new Date();
-  const y = new Date(today); y.setDate(y.getDate() - 1); y.setHours(0,0,0,0);
 
+  const today = new Date();
+  const y = new Date(today);
+  y.setDate(y.getDate() - 1);
+  y.setHours(0,0,0,0);
+
+  // Cache FULL: lê só a coluna de Data (rápido)
   if (cache) {
     const { sh, headers } = cache;
     const lastRow = sh.getLastRow();
-    if (lastRow <= 1) return { ok:true, minISO:_toISODate_(y), maxISO:_toISODate_(y), startISO:_toISODate_(y), endISO:_toISODate_(y), note:'Cache vazio.' };
+    const lastCol = sh.getLastColumn();
+
+    if (lastRow <= 1) {
+      const iso = _toISODate_(y);
+      return { ok:true, minISO:iso, maxISO:iso, startISO:iso, endISO:iso, note:'Cache vazio.' };
+    }
 
     const dateCol = _findColByHeader_(headers, [DASH_CFG.DATE_HEADER]);
-    if (dateCol < 0) return { ok:false, error:'Coluna data não encontrada no cache.' };
+    if (dateCol < 0) {
+      const iso = _toISODate_(y);
+      return { ok:false, error:`CACHE: Coluna "${DASH_CFG.DATE_HEADER}" não encontrada.`, minISO:iso, maxISO:iso, startISO:iso, endISO:iso };
+    }
 
-    const dateVals = sh.getRange(2, dateCol + 1, lastRow - 1, 1).getValues();
-    let minD=null, maxD=null;
-    for (let i=0; i<dateVals.length; i++) {
+    const numRows = lastRow - 1;
+    const dateVals = sh.getRange(2, dateCol + 1, numRows, 1).getValues();
+
+    let minD = null, maxD = null;
+    for (let i = 0; i < dateVals.length; i++) {
       const d = _parseAnyDate_(dateVals[i][0]);
       if (!d) continue;
       if (!minD || d < minD) minD = d;
       if (!maxD || d > maxD) maxD = d;
     }
-    const end = (maxD && maxD < y) ? maxD : y;
-    const start = new Date(end); start.setDate(start.getDate() - 29);
-    return { ok: true, minISO: _toISODate_(minD || start), maxISO: _toISODate_(end), startISO: _toISODate_(start), endISO: _toISODate_(end), note: 'Painel Assessoria' };
+
+    // garante "até ontem"
+    const end = maxD && maxD < y ? maxD : y;
+    const start = new Date(end); start.setDate(start.getDate() - 29); start.setHours(0,0,0,0);
+
+    return {
+      ok: true,
+      minISO: _toISODate_(minD || start),
+      maxISO: _toISODate_(end),
+      startISO: _toISODate_(start),
+      endISO: _toISODate_(end),
+      note: 'Painel Assessoria'
+    };
   }
-  
-  // Fallback se não tiver cache
-  return { ok:true, note: 'Sem cache, verificar configuração.' }; 
+
+  // fallback: usa MESTRE
+  const sh = _getSourceSheet_();
+  const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
+
+  if (lastRow <= DASH_CFG.HEADER_ROW) {
+    const iso = _toISODate_(y);
+    return { ok:true, minISO:iso, maxISO:iso, startISO:iso, endISO:iso, note:'Aba sem dados.' };
+  }
+
+  const headers = sh.getRange(DASH_CFG.HEADER_ROW, 1, 1, lastCol).getValues()[0];
+  const dateCol = _findColByHeader_(headers, [DASH_CFG.DATE_HEADER]);
+  if (dateCol < 0) {
+    const iso = _toISODate_(y);
+    return { ok:false, error:`Coluna "${DASH_CFG.DATE_HEADER}" não encontrada.`, minISO:iso, maxISO:iso, startISO:iso, endISO:iso };
+  }
+
+  const numRows = lastRow - DASH_CFG.HEADER_ROW;
+  const rowStart = DASH_CFG.HEADER_ROW + 1;
+  const dateVals = sh.getRange(rowStart, dateCol + 1, numRows, 1).getValues();
+
+  let minD = null, maxD = null;
+  for (let i = 0; i < dateVals.length; i++) {
+    const d = _parseAnyDate_(dateVals[i][0]);
+    if (!d) continue;
+    if (!minD || d < minD) minD = d;
+    if (!maxD || d > maxD) maxD = d;
+  }
+
+  const end = maxD && maxD < y ? maxD : y;
+  const start = new Date(end); start.setDate(start.getDate() - 29); start.setHours(0,0,0,0);
+
+  return {
+    ok: true,
+    minISO: _toISODate_(minD || start),
+    maxISO: _toISODate_(end),
+    startISO: _toISODate_(start),
+    endISO: _toISODate_(end),
+    note: ''
+  };
 }
 
 function getReportData(payload) {
   let start = _isoToDate_(payload.startISO);
   let end = _isoToDate_(payload.endISO);
+
+  // clamp: nunca passa de ontem
   const today = new Date();
-  const y = new Date(today); y.setDate(y.getDate() - 1); y.setHours(0,0,0,0);
+  const y = new Date(today);
+  y.setDate(y.getDate() - 1);
+  y.setHours(0,0,0,0);
+
   if (start > y) start = new Date(y);
   if (end > y) end = new Date(y);
-  start.setHours(0,0,0,0); end.setHours(23,59,59,999);
+
+  start.setHours(0,0,0,0);
+  end.setHours(23,59,59,999);
 
   const cache = _dashGetCacheFull_();
   if (cache) {
     const { sh, headers } = cache;
-    const values = sh.getRange(2, 1, Math.max(0, sh.getLastRow()-1), sh.getLastColumn()).getValues();
+    const lastRow = sh.getLastRow();
+    const lastCol = sh.getLastColumn();
+    const numRows = Math.max(0, lastRow - 1);
+    const values = numRows ? sh.getRange(2, 1, numRows, lastCol).getValues() : [];
+
     const idx = _dashResolveIdx_(headers);
+
     const current = _dashComputeDaily_(values, idx, start, end);
+
     let compare = null;
     if (payload.compare) {
-      const days = Math.round((end - start)/86400000) + 1;
+      const days = _daysInclusive_(start, end);
       const prevEnd = new Date(start); prevEnd.setDate(prevEnd.getDate() - 1); prevEnd.setHours(23,59,59,999);
       const prevStart = new Date(prevEnd); prevStart.setDate(prevStart.getDate() - (days - 1)); prevStart.setHours(0,0,0,0);
+
       compare = _dashComputeDaily_(values, idx, prevStart, prevEnd);
       compare.range = { startISO: _toISODate_(prevStart), endISO: _toISODate_(prevEnd) };
     }
-    return { ok: true, note: 'Dados CACHE', range: { startISO: _toISODate_(start), endISO: _toISODate_(end) }, columnsFound: idx.found, current, compare };
+
+    return {
+      ok: true,
+      note: 'Dados do CACHE (RAW 180d até ontem).',
+      range: { startISO: _toISODate_(start), endISO: _toISODate_(end) },
+      columnsFound: idx.found,
+      current,
+      compare
+    };
   }
-  return { ok:false, error:'Cache não encontrado. Rode DASH_CACHE_SETUP.' };
+
+  return { ok:false, error:'Cache não encontrado. Rode DASH_CACHE_SETUP (ou DASH_CACHE_REBUILD).' };
 }
 
-// === CACHE CORE ===
+/* ===================== TOKEN (secured endpoints opcionais) ===================== */
+function _assertDashToken_(token){
+  if (!DASH_ACCESS_TOKEN) return true; // sem token configurado, não bloqueia
+  const t = String(token||'').trim();
+  if (t !== DASH_ACCESS_TOKEN) throw new Error('Token inválido.');
+  return true;
+}
+
+function getDashboardDefaultsSecured(token){
+  _assertDashToken_(token);
+  return getDashboardDefaults();
+}
+
+function getReportDataSecured(payload){
+  _assertDashToken_(payload && payload.token);
+  return getReportData(payload);
+}
+
+/* ===================== CACHE – FUNÇÕES PÚBLICAS ===================== */
+function DASH_CACHE_SETUP() { return _dashCacheSetup_(); }
 function DASH_CACHE_REBUILD() { return _dashCacheRebuildFull_(); }
 function DASH_CACHE_SYNC() { return _dashCacheSync_(); }
+function DASH_CACHE_INSTALL_TRIGGER() { return _dashCacheInstallTrigger_(); }
+function DASH_CACHE_REMOVE_TRIGGER() { return _dashCacheRemoveTrigger_(); }
+function DASH_CACHE_STATUS() { return _dashCacheStatus_(); }
+
+/* ===================== CACHE – CORE ===================== */
+function _dashCacheSetup_(){
+  _dashEnsureCacheSheets_();
+  const r = _dashCacheRebuildFull_();
+  _dashCacheInstallTrigger_();
+  return r;
+}
+
+function _dashEnsureCacheSheets_(){
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  const daily = ss.getSheetByName(DASH_CACHE.SHEET_DAILY) || ss.insertSheet(DASH_CACHE.SHEET_DAILY);
+  const meta  = ss.getSheetByName(DASH_CACHE.SHEET_META)  || ss.insertSheet(DASH_CACHE.SHEET_META);
+  const hist  = ss.getSheetByName(DASH_CACHE.SHEET_HIST)  || ss.insertSheet(DASH_CACHE.SHEET_HIST);
+
+  // META
+  meta.clearContents();
+  meta.getRange(1,1,18,2).setValues([
+    ['last_build',''],
+    ['source_sheet',DASH_CFG.SOURCE_SHEET_NAME],
+    ['window_start',''],
+    ['window_end',''],
+    ['source_last_row',''],
+    ['cache_rows',''],
+    ['date_col',''],
+    ['account_col',''],
+    ['spend_col',''],
+    ['revenue_col',''],
+    ['purchases_col',''],
+    ['note',''],
+    ['header_hash',''],
+    ['inserts',''],
+    ['updates',''],
+    ['deletes',''],
+    ['ms',''],
+    ['mode','RAW_180D_TO_YESTERDAY']
+  ]);
+
+  // HIST
+  if (hist.getLastRow() === 0){
+    hist.getRange(1,1,1,8).setValues([['ts','rows_src_window','rows_cache','ins','upd','del','ms','note']]);
+    hist.setFrozenRows(1);
+  }
+
+  daily.hideSheet(); meta.hideSheet(); hist.hideSheet();
+}
+
+function _dashCacheStatus_(){
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const meta = ss.getSheetByName(DASH_CACHE.SHEET_META);
+  const daily = ss.getSheetByName(DASH_CACHE.SHEET_DAILY);
+  return {
+    ok:true,
+    hasDaily: !!daily,
+    dailyRows: daily ? daily.getLastRow() : 0,
+    meta: meta ? meta.getRange(1,1,18,2).getValues() : null
+  };
+}
 
 function _dashGetCacheFull_(){
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss || !DASH_CACHE || !DASH_CACHE.SHEET_DAILY) return null;
   const sh = ss.getSheetByName(DASH_CACHE.SHEET_DAILY);
   if (!sh || sh.getLastRow() < 2) return null;
-  const headers = sh.getRange(1,1,1,sh.getLastColumn()).getValues()[0];
+
+  const lastCol = sh.getLastColumn();
+  const headers = sh.getRange(1,1,1,lastCol).getValues()[0];
   return { sh, headers };
 }
 
 function _dashCacheRebuildFull_(){
+  const t0 = Date.now();
+  _dashEnsureCacheSheets_();
+
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let daily = ss.getSheetByName(DASH_CACHE.SHEET_DAILY);
-  if(!daily) daily = ss.insertSheet(DASH_CACHE.SHEET_DAILY);
+  const daily = ss.getSheetByName(DASH_CACHE.SHEET_DAILY);
+  const meta  = ss.getSheetByName(DASH_CACHE.SHEET_META);
+  const hist  = ss.getSheetByName(DASH_CACHE.SHEET_HIST);
+
+  const sh = _getSourceSheet_();
+  const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
+  if (lastRow <= DASH_CFG.HEADER_ROW) return { ok:false, error:'Sem dados na MESTRE.' };
+
+  const headers = sh.getRange(DASH_CFG.HEADER_ROW,1,1,lastCol).getValues()[0];
+  const dateCol = _findColByHeader_(headers, [DASH_CFG.DATE_HEADER]);
+  if (dateCol < 0) throw new Error(`CACHE: Coluna "${DASH_CFG.DATE_HEADER}" não encontrada na MESTRE.`);
+
+  const accCol = _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.account);
+
+  const window = _dashWindow_();
+  const src = _readSourceWindow_(sh, headers, dateCol, window.start, window.end);
+
   daily.clearContents();
+  daily.getRange(1,1,1,headers.length).setValues([headers]);
+  daily.setFrozenRows(1);
+  if (src.rows.length){
+    daily.getRange(2,1,src.rows.length,headers.length).setValues(src.rows);
+  }
 
-  const src = ss.getSheetByName(DASH_CFG.SOURCE_SHEET_NAME);
-  if(!src) return {ok:false, error:'Sem MESTRE'};
-  const data = src.getDataRange().getValues();
-  if(data.length < 2) return {ok:false};
+  // ordena por Data + Conta (se existir)
+  try{
+    const sortSpec = [];
+    sortSpec.push({ column: dateCol + 1, ascending: true });
+    if (accCol >= 0) sortSpec.push({ column: accCol + 1, ascending: true });
+    if (src.rows.length) daily.getRange(2,1,src.rows.length,headers.length).sort(sortSpec);
+  }catch(e){}
 
-  // Copia bruta
-  daily.getRange(1,1,data.length, data[0].length).setValues(data);
   daily.hideSheet();
-  return {ok:true, mode:'rebuild', rows: data.length};
+
+  const ms = Date.now() - t0;
+  const headerHash = _hashText_(headers.map(x=>String(x||'')).join('|'));
+
+  _metaWrite_(meta, {
+    last_build: new Date(),
+    window_start: _toISODate_(window.start),
+    window_end: _toISODate_(window.end),
+    source_last_row: lastRow,
+    cache_rows: src.rows.length,
+    date_col: dateCol>=0 ? headers[dateCol] : '',
+    account_col: accCol>=0 ? headers[accCol] : '',
+    note: 'REBUILD total',
+    header_hash: headerHash,
+    inserts: src.rows.length,
+    updates: 0,
+    deletes: 0,
+    ms
+  });
+
+  hist.appendRow([new Date(), src.rows.length, src.rows.length, src.rows.length, 0, 0, ms, 'REBUILD total']);
+  hist.hideSheet(); meta.hideSheet();
+
+  return { ok:true, mode:'rebuild', rows_src_window:src.rows.length, rows_cache:src.rows.length, ms };
 }
 
 function _dashCacheSync_(){
-  // Implementação simplificada: chama rebuild (mais seguro para garantir dados)
-  return _dashCacheRebuildFull_();
+  const t0 = Date.now();
+  _dashEnsureCacheSheets_();
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const daily = ss.getSheetByName(DASH_CACHE.SHEET_DAILY);
+  const meta  = ss.getSheetByName(DASH_CACHE.SHEET_META);
+  const hist  = ss.getSheetByName(DASH_CACHE.SHEET_HIST);
+
+  const sh = _getSourceSheet_();
+  const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
+  if (lastRow <= DASH_CFG.HEADER_ROW) return { ok:false, error:'Sem dados na MESTRE.' };
+
+  const srcHeaders = sh.getRange(DASH_CFG.HEADER_ROW,1,1,lastCol).getValues()[0];
+  const dateCol = _findColByHeader_(srcHeaders, [DASH_CFG.DATE_HEADER]);
+  if (dateCol < 0) throw new Error(`CACHE: Coluna "${DASH_CFG.DATE_HEADER}" não encontrada na MESTRE.`);
+
+  const accCol = _findColByHeader_(srcHeaders, DASH_CFG.COL_CANDIDATES.account);
+
+  if (daily.getLastRow() < 2) {
+    const r = _dashCacheRebuildFull_();
+    r.note = 'cache vazio => rebuild';
+    return r;
+  }
+
+  const cacheHeaders = daily.getRange(1,1,1,daily.getLastColumn()).getValues()[0];
+  const srcHash = _hashText_(srcHeaders.map(x=>String(x||'')).join('|'));
+  const cacheHash = _hashText_(cacheHeaders.map(x=>String(x||'')).join('|'));
+
+  if (srcHash !== cacheHash) {
+    const r = _dashCacheRebuildFull_();
+    r.note = 'header mudou => rebuild';
+    return r;
+  }
+
+  const window = _dashWindow_();
+  const src = _readSourceWindow_(sh, srcHeaders, dateCol, window.start, window.end);
+
+  const srcMap = Object.create(null);
+  for (let i=0;i<src.rows.length;i++){
+    const key = _rowKey_(src.rows[i], dateCol, accCol);
+    if (!key) continue;
+    srcMap[key] = src.rows[i];
+  }
+
+  const lr = daily.getLastRow();
+  const lc = daily.getLastColumn();
+  const cacheAll = daily.getRange(1,1,lr,lc).getValues();
+  const rows = cacheAll.slice(1);
+
+  const cacheMap = Object.create(null);
+  for (let i=0;i<rows.length;i++){
+    const rowIndex = i + 2;
+    const key = _rowKey_(rows[i], dateCol, accCol);
+    if (!key) continue;
+    cacheMap[key] = { rowIndex, row: rows[i], hash: _rowHash_(rows[i]) };
+  }
+
+  const toUpdate = [];
+  const toInsert = [];
+  const toDelete = [];
+
+  for (const key in srcMap){
+    const srcRow = srcMap[key];
+    const srcH = _rowHash_(srcRow);
+    const ex = cacheMap[key];
+    if (!ex) toInsert.push(srcRow);
+    else if (ex.hash !== srcH) toUpdate.push({ rowIndex: ex.rowIndex, row: srcRow });
+  }
+
+  for (const key in cacheMap){
+    if (!srcMap[key]) toDelete.push(cacheMap[key].rowIndex);
+  }
+
+  const churn = toInsert.length + toUpdate.length + toDelete.length;
+  if (churn > 1500){
+    const r = _dashCacheRebuildFull_();
+    r.note = `churn alto (${churn}) => rebuild`;
+    return r;
+  }
+
+  toDelete.sort((a,b)=>b-a);
+  for (let i=0;i<toDelete.length;i++) daily.deleteRow(toDelete[i]);
+
+  for (let i=0;i<toUpdate.length;i++){
+    daily.getRange(toUpdate[i].rowIndex, 1, 1, lc).setValues([toUpdate[i].row]);
+  }
+
+  if (toInsert.length){
+    const startRow = daily.getLastRow() + 1;
+    daily.getRange(startRow, 1, toInsert.length, lc).setValues(toInsert);
+  }
+
+  const newLR = daily.getLastRow();
+  const newNum = Math.max(newLR - 1, 0);
+
+  try{
+    const sortSpec = [];
+    sortSpec.push({ column: dateCol + 1, ascending: true });
+    if (accCol >= 0) sortSpec.push({ column: accCol + 1, ascending: true });
+    if (newNum) daily.getRange(2,1,newNum,lc).sort(sortSpec);
+  }catch(e){}
+
+  daily.hideSheet();
+
+  const ms = Date.now() - t0;
+
+  const spendCol = _findColByHeader_(srcHeaders, DASH_CFG.COL_CANDIDATES.spend);
+  const revenueCol = _findColByHeader_(srcHeaders, DASH_CFG.COL_CANDIDATES.revenue);
+  const purchasesCol = _findColByHeader_(srcHeaders, DASH_CFG.COL_CANDIDATES.purchases);
+
+  _metaWrite_(meta, {
+    last_build: new Date(),
+    window_start: _toISODate_(window.start),
+    window_end: _toISODate_(window.end),
+    source_last_row: lastRow,
+    cache_rows: newNum,
+    date_col: dateCol>=0 ? srcHeaders[dateCol] : '',
+    account_col: accCol>=0 ? srcHeaders[accCol] : '',
+    spend_col: spendCol>=0 ? srcHeaders[spendCol] : '',
+    revenue_col: revenueCol>=0 ? srcHeaders[revenueCol] : '',
+    purchases_col: purchasesCol>=0 ? srcHeaders[purchasesCol] : '',
+    note: 'SYNC incremental',
+    header_hash: srcHash,
+    inserts: toInsert.length,
+    updates: toUpdate.length,
+    deletes: toDelete.length,
+    ms
+  });
+
+  hist.appendRow([new Date(), src.rows.length, newNum, toInsert.length, toUpdate.length, toDelete.length, ms, 'SYNC incremental']);
+  hist.hideSheet(); meta.hideSheet();
+
+  return {
+    ok:true,
+    mode:'sync',
+    rows_src_window: src.rows.length,
+    rows_cache: newNum,
+    inserts: toInsert.length,
+    updates: toUpdate.length,
+    deletes: toDelete.length,
+    ms
+  };
 }
 
-// === COMPUTATION HELPERS ===
+function _dashCacheInstallTrigger_(){
+  _dashCacheRemoveTrigger_();
+  ScriptApp.newTrigger(DASH_CACHE.TRIGGER_FN)
+    .timeBased()
+    .everyDays(1)
+    .atHour(DASH_CACHE.TRIGGER_HOUR)
+    .nearMinute(0)
+    .create();
+}
+
+function _dashCacheRemoveTrigger_(){
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction && t.getHandlerFunction() === DASH_CACHE.TRIGGER_FN) {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+}
+
+/* ===================== CACHE – WINDOW READ ===================== */
+function _dashWindow_(){
+  const end = DASH_CACHE.EXCLUDE_TODAY ? _yesterday_() : new Date();
+  end.setHours(0,0,0,0);
+  const start = new Date(end);
+  start.setDate(start.getDate() - (DASH_CACHE.WINDOW_DAYS - 1));
+  start.setHours(0,0,0,0);
+  return { start, end };
+}
+
+function _readSourceWindow_(sh, headers, dateCol, winStart, winEnd){
+  const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
+  const rowStart = DASH_CFG.HEADER_ROW + 1;
+  const numRows = lastRow - DASH_CFG.HEADER_ROW;
+  if (numRows <= 0) return { rows: [] };
+
+  const dateVals = sh.getRange(rowStart, dateCol + 1, numRows, 1).getValues();
+  let minAbs = null, maxAbs = null;
+
+  for (let i=0;i<dateVals.length;i++){
+    const d = _parseAnyDate_(dateVals[i][0]);
+    if (!d) continue;
+    if (d < winStart || d > winEnd) continue;
+    const abs = rowStart + i;
+    if (minAbs === null || abs < minAbs) minAbs = abs;
+    if (maxAbs === null || abs > maxAbs) maxAbs = abs;
+  }
+
+  if (minAbs === null) return { rows: [] };
+
+  const block = sh.getRange(minAbs, 1, (maxAbs - minAbs + 1), lastCol).getValues();
+  const rows = [];
+
+  for (let i=0;i<block.length;i++){
+    const d = _parseAnyDate_(block[i][dateCol]);
+    if (!d) continue;
+    if (d < winStart || d > winEnd) continue;
+    rows.push(block[i]);
+  }
+
+  return { rows };
+}
+
+/* ===================== COMPUTE (cache full) ===================== */
 function _dashResolveIdx_(headers){
-  const find = (c) => _findColByHeader_(headers, c);
   const idx = {
-    date: find(DASH_CFG.DATE_HEADER),
-    meta: find(DASH_CFG.COL_CANDIDATES.metaSpend),
-    google: find(DASH_CFG.COL_CANDIDATES.googleSpend),
-    total: find(DASH_CFG.COL_CANDIDATES.totalSpend),
-    cart: find(DASH_CFG.COL_CANDIDATES.cart),
-    checkout: find(DASH_CFG.COL_CANDIDATES.checkout),
-    infoPay: find(DASH_CFG.COL_CANDIDATES.infoPay),
-    purch: find(DASH_CFG.COL_CANDIDATES.purchase),
-    sess: find(DASH_CFG.COL_CANDIDATES.sessions),
-    trans: find(DASH_CFG.COL_CANDIDATES.transactions),
-    revPaid: find(DASH_CFG.COL_CANDIDATES.revenuePaid),
-    revAny: find(DASH_CFG.COL_CANDIDATES.revenueAny),
-    revUnpaid: find(DASH_CFG.COL_CANDIDATES.revenueUnpaid)
+    date: _findColByHeader_(headers, [DASH_CFG.DATE_HEADER]),
+
+    metaSpend: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.metaSpend),
+    googleSpend: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.googleSpend),
+    totalSpend: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.totalSpend),
+
+    cart: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.cart),
+    checkout: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.checkout),
+    infoPay: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.infoPay),
+    purchase: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.purchase),
+
+    sessions: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.sessions),
+    transactions: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.transactions),
+
+    revenuePaid: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.revenuePaid),
+    revenueUnpaid: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.revenueUnpaid),
+    revenueAny: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.revenueAny),
   };
-  idx.found = {}; // Populate for frontend debug if needed
+
+  idx.found = {
+    date: idx.date >= 0 ? headers[idx.date] : null,
+    spend_total: idx.totalSpend >= 0 ? headers[idx.totalSpend] : null,
+    spend_meta: idx.metaSpend >= 0 ? headers[idx.metaSpend] : null,
+    spend_google: idx.googleSpend >= 0 ? headers[idx.googleSpend] : null,
+    revenue_paid: idx.revenuePaid >= 0 ? headers[idx.revenuePaid] : (idx.revenueAny >= 0 ? headers[idx.revenueAny] : null),
+    revenue_unpaid: idx.revenueUnpaid >= 0 ? headers[idx.revenueUnpaid] : null,
+    cart: idx.cart >= 0 ? headers[idx.cart] : null,
+    checkout: idx.checkout >= 0 ? headers[idx.checkout] : null,
+    infoPay: idx.infoPay >= 0 ? headers[idx.infoPay] : null,
+    purchases: idx.purchase >= 0 ? headers[idx.purchase] : null,
+    sessions: idx.sessions >= 0 ? headers[idx.sessions] : null,
+    transactions: idx.transactions >= 0 ? headers[idx.transactions] : null,
+  };
+
+  if (idx.date < 0) throw new Error(`CACHE FULL: Coluna de data "${DASH_CFG.DATE_HEADER}" não encontrada.`);
   return idx;
 }
 
 function _dashComputeDaily_(rows, idx, start, end){
-  let sumSpend=0, sumMeta=0, sumGoogle=0, sumRev=0, sumUnpaid=0, sumPurch=0, sumCart=0, sumCheck=0, sumInfo=0, sumSess=0, sumTx=0;
-  let spendBuy=0, spendNoBuy=0;
-  const daily = {};
+  const daily = Object.create(null);
 
-  for (let i=0; i<rows.length; i++){
+  let sumSpend = 0, sumMeta = 0, sumGoogle = 0;
+  let sumRevenue = 0, sumUnpaid = 0;
+  let sumPurch = 0, sumCart = 0, sumCheckout = 0, sumInfo = 0;
+  let sumSessions = 0, sumTx = 0;
+
+  let spendWithBuy = 0, spendNoBuy = 0;
+
+  for (let i = 0; i < rows.length; i++){
     const d = _parseAnyDate_(rows[i][idx.date]);
-    if (!d || d < start || d > end) continue;
-    const key = _toISODate_(d);
-    
-    if(!daily[key]) daily[key] = {spend:0, meta:0, google:0, rev:0, purch:0};
-    
-    const meta = idx.meta>=0 ? _parseNumber_(rows[i][idx.meta]) : 0;
-    const goog = idx.google>=0 ? _parseNumber_(rows[i][idx.google]) : 0;
-    let spend = (idx.total>=0 ? _parseNumber_(rows[i][idx.total]) : (meta+goog));
-    let rev = (idx.revPaid>=0 ? _parseNumber_(rows[i][idx.revPaid]) : (idx.revAny>=0 ? _parseNumber_(rows[i][idx.revAny]) : 0));
-    const purch = idx.purch>=0 ? _parseNumber_(rows[i][idx.purch]) : 0;
+    if (!d) continue;
+    if (d < start || d > end) continue;
 
-    daily[key].spend += spend;
+    const key = _toISODate_(d);
+    if (!daily[key]) daily[key] = {
+      spend:0, meta:0, google:0,
+      revenue:0, unpaid:0,
+      purchases:0, cart:0, checkout:0, infoPay:0,
+      sessions:0, transactions:0
+    };
+
+    const meta = idx.metaSpend >= 0 ? _parseNumber_(rows[i][idx.metaSpend]) : 0;
+    const goog = idx.googleSpend >= 0 ? _parseNumber_(rows[i][idx.googleSpend]) : 0;
+
+    let spend = 0;
+    if (idx.totalSpend >= 0) spend = _parseNumber_(rows[i][idx.totalSpend]);
+    else spend = meta + goog;
+
+    let revenue = 0;
+    if (idx.revenuePaid >= 0) revenue = _parseNumber_(rows[i][idx.revenuePaid]);
+    else if (idx.revenueAny >= 0) revenue = _parseNumber_(rows[i][idx.revenueAny]);
+
+    const unpaid = idx.revenueUnpaid >= 0 ? _parseNumber_(rows[i][idx.revenueUnpaid]) : 0;
+
+    const purch = idx.purchase >= 0 ? _parseNumber_(rows[i][idx.purchase]) : 0;
+    const cart = idx.cart >= 0 ? _parseNumber_(rows[i][idx.cart]) : 0;
+    const checkout = idx.checkout >= 0 ? _parseNumber_(rows[i][idx.checkout]) : 0;
+    const infoPay = idx.infoPay >= 0 ? _parseNumber_(rows[i][idx.infoPay]) : 0;
+
+    const sessions = idx.sessions >= 0 ? _parseNumber_(rows[i][idx.sessions]) : 0;
+    const tx = idx.transactions >= 0 ? _parseNumber_(rows[i][idx.transactions]) : 0;
+
     daily[key].meta += meta;
     daily[key].google += goog;
-    daily[key].rev += rev;
-    daily[key].purch += purch;
+    daily[key].spend += spend;
+    daily[key].revenue += revenue;
+    daily[key].unpaid += unpaid;
+    daily[key].purchases += purch;
+    daily[key].cart += cart;
+    daily[key].checkout += checkout;
+    daily[key].infoPay += infoPay;
+    daily[key].sessions += sessions;
+    daily[key].transactions += tx;
 
-    sumSpend+=spend; sumMeta+=meta; sumGoogle+=goog; sumRev+=rev; sumPurch+=purch;
-    if(idx.revUnpaid>=0) sumUnpaid += _parseNumber_(rows[i][idx.revUnpaid]);
-    if(idx.cart>=0) sumCart += _parseNumber_(rows[i][idx.cart]);
-    if(idx.checkout>=0) sumCheck += _parseNumber_(rows[i][idx.checkout]);
-    if(idx.infoPay>=0) sumInfo += _parseNumber_(rows[i][idx.infoPay]);
-    if(idx.sess>=0) sumSess += _parseNumber_(rows[i][idx.sess]);
-    if(idx.trans>=0) sumTx += _parseNumber_(rows[i][idx.trans]);
+    sumMeta += meta; sumGoogle += goog; sumSpend += spend;
+    sumRevenue += revenue; sumUnpaid += unpaid;
+    sumPurch += purch; sumCart += cart; sumCheckout += checkout; sumInfo += infoPay;
+    sumSessions += sessions; sumTx += tx;
   }
-  
+
   const labels = Object.keys(daily).sort();
-  labels.forEach(k => {
-    if(daily[k].purch > 0) spendBuy += daily[k].spend; else spendNoBuy += daily[k].spend;
-  });
+
+  const spendSeries = labels.map(k => _round2_(daily[k].spend));
+  const metaSpendSeries = labels.map(k => _round2_(daily[k].meta));
+  const googleSpendSeries = labels.map(k => _round2_(daily[k].google));
+  const revenueSeries = labels.map(k => _round2_(daily[k].revenue));
+  const unpaidSeries = labels.map(k => _round2_(daily[k].unpaid));
+  const purchasesSeries = labels.map(k => _round2_(daily[k].purchases));
+  const cartSeries = labels.map(k => _round2_(daily[k].cart));
+  const checkoutSeries = labels.map(k => _round2_(daily[k].checkout));
+  const infoPaySeries = labels.map(k => _round2_(daily[k].infoPay));
+  const sessionsSeries = labels.map(k => _round2_(daily[k].sessions));
+  const transactionsSeries = labels.map(k => _round2_(daily[k].transactions));
+
+  for (let i = 0; i < labels.length; i++){
+    const k = labels[i];
+    if (daily[k].purchases > 0) spendWithBuy += daily[k].spend;
+    else spendNoBuy += daily[k].spend;
+  }
+
+  const roas = sumSpend > 0 ? (sumRevenue / sumSpend) : 0;
+  const cpa = sumPurch > 0 ? (sumSpend / sumPurch) : 0;
+  const aov = sumPurch > 0 ? (sumRevenue / sumPurch) : 0;
+  const txConv = sumSessions > 0 ? (sumTx / sumSessions) : 0;
+
+  const metaShare = sumSpend > 0 ? (sumMeta / sumSpend) : 0;
+  const googleShare = sumSpend > 0 ? (sumGoogle / sumSpend) : 0;
 
   return {
     kpis: {
-      spend: sumSpend, revenue: sumRev, unpaid: sumUnpaid, purchases: sumPurch,
-      roas: sumSpend?sumRev/sumSpend:0, cpa: sumPurch?sumSpend/sumPurch:0, aov: sumPurch?sumRev/sumPurch:0,
-      spendMeta: sumMeta, spendGoogle: sumGoogle, metaShare: sumSpend?sumMeta/sumSpend:0, googleShare: sumSpend?sumGoogle/sumSpend:0,
-      cart: sumCart, checkout: sumCheck, infoPay: sumInfo, sessions: sumSess, transactions: sumTx, txConv: sumSess?sumTx/sumSess:0,
-      spendWithBuy: spendBuy, spendNoBuy: spendNoBuy
+      spend: _round2_(sumSpend),
+      revenue: _round2_(sumRevenue),
+      unpaid: _round2_(sumUnpaid),
+      purchases: _round2_(sumPurch),
+      roas: _round2_(roas),
+
+      spendMeta: _round2_(sumMeta),
+      spendGoogle: _round2_(sumGoogle),
+      metaShare: _round2_(metaShare),
+      googleShare: _round2_(googleShare),
+
+      cpa: _round2_(cpa),
+      aov: _round2_(aov),
+
+      cart: _round2_(sumCart),
+      checkout: _round2_(sumCheckout),
+      infoPay: _round2_(sumInfo),
+
+      sessions: _round2_(sumSessions),
+      transactions: _round2_(sumTx),
+      txConv: _round2_(txConv),
+
+      spendWithBuy: _round2_(spendWithBuy),
+      spendNoBuy: _round2_(spendNoBuy),
     },
     series: {
       labels,
-      spendSeries: labels.map(k=>daily[k].spend),
-      revenueSeries: labels.map(k=>daily[k].rev),
-      metaSpendSeries: labels.map(k=>daily[k].meta),
-      googleSpendSeries: labels.map(k=>daily[k].google)
+      spendSeries,
+      revenueSeries,
+      unpaidSeries,
+      purchasesSeries,
+      metaSpendSeries,
+      googleSpendSeries,
+      cartSeries,
+      checkoutSeries,
+      infoPaySeries,
+      sessionsSeries,
+      transactionsSeries
     }
   };
 }
 
-// === HELPERS LOCAL DASH ===
+/* ===================== HELPERS ===================== */
+function _getSourceSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(DASH_CFG.SOURCE_SHEET_NAME);
+  if (!sh) throw new Error(`Aba "${DASH_CFG.SOURCE_SHEET_NAME}" não encontrada.`);
+  return sh;
+}
+
 function _findColByHeader_(headers, candidates) {
   const h = headers.map(x => String(x || '').trim().toLowerCase());
   const arr = Array.isArray(candidates) ? candidates : [candidates];
@@ -240,18 +812,141 @@ function _findColByHeader_(headers, candidates) {
   }
   return -1;
 }
+
+function _yesterday_(){
+  const d = new Date();
+  d.setHours(0,0,0,0);
+  d.setDate(d.getDate()-1);
+  return d;
+}
+
 function _parseAnyDate_(v) {
-  if (v instanceof Date) return new Date(v.setHours(0,0,0,0));
   if (!v) return null;
-  const s = String(v).split('T')[0];
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    const p = s.split('-'); return new Date(p[0], p[1]-1, p[2]);
+
+  if (Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v)) {
+    const d = new Date(v);
+    d.setHours(0,0,0,0);
+    return d;
   }
-  return null; 
+
+  let s = String(v).trim();
+  if (!s) return null;
+
+  s = s.split('T')[0].split(' ')[0];
+
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    const dd = Number(m[1]), mm = Number(m[2]) - 1;
+    let yyyy = Number(m[3]); if (yyyy < 100) yyyy += 2000;
+    const d = new Date(yyyy, mm, dd);
+    if (!isNaN(d)) { d.setHours(0,0,0,0); return d; }
+  }
+
+  const m2 = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m2) {
+    const yyyy = Number(m2[1]), mm = Number(m2[2]) - 1, dd = Number(m2[3]);
+    const d = new Date(yyyy, mm, dd);
+    if (!isNaN(d)) { d.setHours(0,0,0,0); return d; }
+  }
+
+  return null;
 }
-function _parseNumber_(v){
-  if(typeof v === 'number') return v;
-  return Number(String(v||'0').replace('.','').replace(',','.')) || 0;
+
+function _parseNumber_(v) {
+  if (v === null || v === undefined || v === '') return 0;
+  if (typeof v === 'number' && isFinite(v)) return v;
+
+  let s = String(v).replace(/\u00A0/g,' ').trim();
+  if (!s) return 0;
+
+  s = s.replace(/R\$\s?/gi,'').trim();
+
+  const negative = /^\(.*\)$/.test(s);
+  if (negative) s = s.replace(/[()]/g,'');
+
+  if (/^\d{1,3}(\.\d{3})*,\d{1,2}$/.test(s)) s = s.replace(/\./g,'').replace(',','.');
+  else if (/^\d{1,3}(,\d{3})*\.\d{1,2}$/.test(s)) s = s.replace(/,/g,'');
+  else if (s.indexOf(',') >= 0 && s.indexOf('.') === -1) s = s.replace(',','.');
+  else s = s.replace(/[^\d.-]/g,'');
+
+  let n = Number(s);
+  if (!isFinite(n)) n = 0;
+  if (negative) n = -Math.abs(n);
+  return n;
 }
-function _isoToDate_(iso) { const p=iso.split('-'); return new Date(p[0],p[1]-1,p[2]); }
-function _toISODate_(d) { return Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd'); }
+
+function _isoToDate_(iso) {
+  const [y,m,d] = String(iso).split('-').map(Number);
+  const dt = new Date(y, m-1, d);
+  dt.setHours(0,0,0,0);
+  return dt;
+}
+
+function _toISODate_(d) {
+  const dt = new Date(d);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth()+1).padStart(2,'0');
+  const day = String(dt.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+
+function _daysInclusive_(start, end) {
+  const s = new Date(start); s.setHours(0,0,0,0);
+  const e = new Date(end); e.setHours(0,0,0,0);
+  return Math.round((e - s) / 86400000) + 1;
+}
+
+function _round2_(n) {
+  return Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function _rowKey_(row, dateCol, accCol){
+  const d = _parseAnyDate_(row[dateCol]);
+  if (!d) return null;
+  const iso = _toISODate_(d);
+
+  let acc = '';
+  if (accCol >= 0) acc = String(row[accCol] || '').trim().toUpperCase();
+  return accCol >= 0 ? `${acc}|${iso}` : `__NOACC__|${iso}|${JSON.stringify(row).length}`;
+}
+
+function _rowHash_(row){
+  const parts = row.map(v => {
+    if (Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v)) return `D:${_toISODate_(v)}`;
+    if (typeof v === 'number' && isFinite(v)) return `N:${v}`;
+    return `S:${String(v ?? '')}`;
+  });
+  return _hashText_(parts.join('\u0001'));
+}
+
+function _hashText_(text){
+  const raw = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, text, Utilities.Charset.UTF_8);
+  return Utilities.base64Encode(raw);
+}
+
+function _metaWrite_(metaSheet, o){
+  const range = metaSheet.getRange(1,1,18,2).getValues();
+  const keyToRow = {};
+  for (let i=0;i<range.length;i++) keyToRow[String(range[i][0]||'')] = i+1;
+
+  const set = (k,v)=>{ const r = keyToRow[k]; if (r) metaSheet.getRange(r,2).setValue(v); };
+
+  set('last_build', o.last_build || '');
+  set('source_sheet', DASH_CFG.SOURCE_SHEET_NAME);
+  set('window_start', o.window_start || '');
+  set('window_end', o.window_end || '');
+  set('source_last_row', o.source_last_row || '');
+  set('cache_rows', o.cache_rows || '');
+  set('date_col', o.date_col || '');
+  set('account_col', o.account_col || '');
+  set('spend_col', o.spend_col || '');
+  set('revenue_col', o.revenue_col || '');
+  set('purchases_col', o.purchases_col || '');
+  set('note', o.note || '');
+  set('header_hash', o.header_hash || '');
+  set('inserts', o.inserts || 0);
+  set('updates', o.updates || 0);
+  set('deletes', o.deletes || 0);
+  set('ms', o.ms || 0);
+  set('mode', o.mode || 'RAW_180D_TO_YESTERDAY');
+}
