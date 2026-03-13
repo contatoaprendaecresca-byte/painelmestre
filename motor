@@ -15,7 +15,7 @@ const SP = PropertiesService.getScriptProperties();
 const HEADER = [
   'Conta ID','Data','Dia Da Semana','Facebook (R$)','Cart','Checkout','Info. Pagamento','purshase','ROAS',
   'Google Ads (R$)','Total (R$)','Sessões GA4','Transações GA4','TX Conv Sessão','Receita Captada GA4 (R$)',
-  'Ticket Médio (R$)','Receita Paga Bagy (R$)','Pedidos Pagos Bagy','Não Pagos Bagy (R$)','CPS (R$)',
+  'Ticket Médio (R$)','Receita Paga LojaVirtual (R$)','Pedidos Pagos LojaVirtual','Não Pagos LojaVirtual (R$)','CPS (R$)',
   'CPA/Meta (R$)','ROAS/Diario [CAP]','Taxa De Rejeição GA4'
 ];
 const HEADER_COLS = HEADER.length;
@@ -23,8 +23,8 @@ const HEADER_COLS = HEADER.length;
 // Mapa de colunas (1-based)
 const COL = {
   CONTA:1, DATA:2, DIA:3, FB:4, CART:5, CHECK:6, ADDPAY:7, PURCHASE:8, ROAS:9, GADS:10,
-  TOTAL:11, SESS:12, TRANS:13, TXCONV:14, REVENUE:15, TICKET:16, BAGY_REV:17, BAGY_ORD:18,
-  BAGY_NP:19, CPS:20, CPA:21, ROAS_CAP:22, BOUNCE:23
+  TOTAL:11, SESS:12, TRANS:13, TXCONV:14, REVENUE:15, TICKET:16, LojaVirtual_REV:17, LojaVirtual_ORD:18,
+  LojaVirtual_NP:19, CPS:20, CPA:21, ROAS_CAP:22, BOUNCE:23
 };
 
 // === FUNÇÕES PRINCIPAIS DO MOTOR ===
@@ -204,7 +204,7 @@ function processAccount_(acc, startISO, endISO, opts){
       vals[COL.TRANS]    = toInt_(g.transactions);
       // Col 14 é fórmula
       vals[COL.REVENUE]  = moneyToNumber_(g.revenue);
-      // Col 16 a 22 fórmulas ou Bagy
+      // Col 16 a 22 fórmulas ou LojaVirtual
       vals[COL.BOUNCE]   = normalizeBounce_(g.bounce);
 
       const existingRow = primaryRowByDate[d] || null;
