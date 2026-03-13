@@ -260,7 +260,7 @@
         <div class="row">
           <button class="btn" id="btn7">Últimos 7 dias</button>
           <button class="btn" id="btn30">Últimos 30 dias</button>
-          <button class="btn" id="btnMTD">MTD (até ontem)</button>
+          <button class="btn" id="btnMesAtual">MesAtual (até ontem)</button>
         </div>
 
         <label class="switch">
@@ -396,7 +396,7 @@
       return `${yy}-${mm}-${dd}`;
     }
 
-    function mtdUntilYesterday(){
+    function MesAtualUntilYesterday(){
       const today = new Date();
       const y = today.getFullYear();
       const m = today.getMonth();
@@ -741,8 +741,8 @@
       postHeightToParent();
     });
 
-    $('btnMTD').addEventListener('click', ()=>{
-      const { sISO, eISO } = mtdUntilYesterday();
+    $('btnMesAtual').addEventListener('click', ()=>{
+      const { sISO, eISO } = MesAtualUntilYesterday();
       setRange(sISO, eISO);
       postHeightToParent();
     });
