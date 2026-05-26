@@ -1,0 +1,613 @@
+/**
+ * ClaudeWhatsApp.gs
+ * Gera mensagem humanizada para o grupo do cliente via Claude AI.
+ *
+ * ✅ Segue a estrutura do insights.gs (comparativo de período, produtos, regiões, dias fortes)
+ * ✅ Usa Claude para humanizar o texto — sem termos técnicos, tom quente e positivo
+ * ✅ Resultado pronto para colar no grupo do WhatsApp
+ *
+ * PRÉ-REQUISITO: ClaudeConnect.gs instalado e CLAUDE_API_KEY configurada.
+ *
+ * ADICIONAR AO MENU (em Main.gs, dentro de onOpen, antes de root.addToUi()):
+ *
+ *   const mCW = ui.createMenu('💬 WhatsApp Cliente');
+ *   mCW
+ *     .addItem('📲 7 dias — comparativo automático',        'cw_ultimos7Dias')
+ *     .addItem('📲 7 dias — vs ano anterior (YoY)',         'cw_ultimos7Dias_YoY')
+ *     .addItem('📲 7 dias — vs semana anterior',            'cw_ultimos7Dias_anterior')
+ *     .addSeparator()
+ *     .addItem('📲 14 dias — comparativo automático',       'cw_ultimos14Dias')
+ *     .addItem('📲 14 dias — vs ano anterior (YoY)',        'cw_ultimos14Dias_YoY')
+ *     .addSeparator()
+ *     .addItem('📲 30 dias — comparativo automático',       'cw_ultimos30Dias')
+ *     .addSeparator()
+ *     .addItem('📆 Período manual — automático',            'cw_periodoManual')
+ *     .addItem('📆 Período manual — vs ano anterior',       'cw_periodoManual_YoY')
+ *     .addItem('📆 Período manual — vs período anterior',   'cw_periodoManual_anterior')
+ *     .addSeparator()
+ *     .addItem('⏰ Instalar gatilho semanal (seg 07:30)',   'cw_instalarGatilho')
+ *     .addItem('🧹 Remover gatilho',                        'cw_removerGatilho')
+ *     .addItem('🔍 Diagnóstico de colunas',                 'cw_diagnosticar');
+ *   root.addSubMenu(mCW);
+ */
+
+// ─── HANDLERS PÚBLICOS ────────────────────────────────────────────────────────
+// Modo de comparação: 'auto' | 'yoy' | 'anterior'
+// 'auto'     → tenta YoY primeiro; se não tiver dados, usa período anterior
+// 'yoy'      → força comparação com mesmo período do ano anterior
+// 'anterior' → força comparação com o período imediatamente anterior (semana/janela passada)
+
+function cw_ultimos7Dias()          { cw_gerarPorJanela_(7,  'auto');     }
+function cw_ultimos7Dias_YoY()      { cw_gerarPorJanela_(7,  'yoy');      }
+function cw_ultimos7Dias_anterior() { cw_gerarPorJanela_(7,  'anterior'); }
+function cw_ultimos14Dias()         { cw_gerarPorJanela_(14, 'auto');     }
+function cw_ultimos14Dias_YoY()     { cw_gerarPorJanela_(14, 'yoy');      }
+function cw_ultimos30Dias()         { cw_gerarPorJanela_(30, 'auto');     }
+
+function cw_gerarPorJanela_(dias, modoComp) {
+  const hoje  = cw_startOfDay_(new Date());
+  const fimAt = cw_addDays_(hoje, -1);
+  const iniAt = cw_addDays_(fimAt, -(dias - 1));
+  // Período anterior padrão (usado se modoComp='anterior' ou como fallback)
+  const fimAnt = cw_addDays_(iniAt, -1);
+  const iniAnt = cw_addDays_(fimAnt, -(dias - 1));
+  cw_gerarMensagem_(iniAt, fimAt, iniAnt, fimAnt, 'auto-' + dias + 'd', modoComp);
+}
+
+function cw_periodoManual() {
+  cw_periodoManualComModo_('auto');
+}
+
+function cw_periodoManual_YoY() {
+  cw_periodoManualComModo_('yoy');
+}
+
+function cw_periodoManual_anterior() {
+  cw_periodoManualComModo_('anterior');
+}
+
+function cw_periodoManualComModo_(modoComp) {
+  const ui = SpreadsheetApp.getUi();
+  const resp = ui.prompt(
+    '📆 Período para mensagem ao cliente',
+    'Digite no formato: DD/MM/AAAA a DD/MM/AAAA\nExemplo: 07/03/2026 a 13/03/2026',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+
+  const partes = (resp.getResponseText() || '').trim().split(/\s+a\s+/i);
+  if (partes.length !== 2) { ui.alert('❌ Formato inválido. Use: DD/MM/AAAA a DD/MM/AAAA'); return; }
+
+  const iniAt = cw_parseBR_(partes[0].trim());
+  const fimAt = cw_parseBR_(partes[1].trim());
+  if (!iniAt || !fimAt) { ui.alert('❌ Datas inválidas.'); return; }
+
+  const dias   = Math.round((fimAt - iniAt) / 86400000) + 1;
+  const fimAnt = cw_addDays_(iniAt, -1);
+  const iniAnt = cw_addDays_(fimAnt, -(dias - 1));
+  cw_gerarMensagem_(iniAt, fimAt, iniAnt, fimAnt, 'manual', modoComp);
+}
+
+/** Gatilho semanal: toda segunda 07:30 */
+function cw_rodarSemanalAuto() { cw_ultimos7Dias(); }
+
+function cw_instalarGatilho() {
+  cw_removerGatilho();
+  ScriptApp.newTrigger('cw_rodarSemanalAuto')
+    .timeBased().onWeekDay(ScriptApp.WeekDay.MONDAY).atHour(7).nearMinute(30).create();
+  SpreadsheetApp.getUi().alert('⏰ Gatilho instalado: segunda-feira 07:30');
+}
+
+function cw_removerGatilho() {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'cw_rodarSemanalAuto')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+}
+
+// ─── CORE ────────────────────────────────────────────────────────────────────
+
+function cw_gerarMensagem_(iniAt, fimAt, iniAnt, fimAnt, modo, modoComp) {
+  // 1. Chave
+  const apiKey = PropertiesService.getScriptProperties().getProperty('CLAUDE_API_KEY');
+  if (!apiKey) {
+    SpreadsheetApp.getUi().alert('❌ CLAUDE_API_KEY não encontrada em PROPRIEDADES.');
+    return;
+  }
+
+  // 2. Lê MESTRE
+  const ss = SpreadsheetApp.getActive();
+  const sh = ss.getSheetByName('MESTRE');
+  if (!sh) throw new Error('Aba MESTRE não encontrada.');
+
+  const { headerMap, rows } = cw_lerMestre_(sh);
+  const atual = cw_resumir_(rows, headerMap, iniAt, fimAt);
+
+  // 3. Decide comparativo conforme modoComp
+  //    'yoy'      → força ano anterior
+  //    'anterior' → força período anterior imediato
+  //    'auto'     → tenta YoY; se não tiver dados, usa anterior
+  modoComp = modoComp || 'auto';
+
+  const iniYoY = cw_addDays_(iniAt, -364);
+  const fimYoY = cw_addDays_(fimAt, -364);
+  const resumoYoY = cw_resumir_(rows, headerMap, iniYoY, fimYoY);
+  const temYoY    = resumoYoY.receitaPaga > 0;
+
+  let comparativo, iniComp, fimComp, tipoComp;
+
+  if (modoComp === 'yoy' || (modoComp === 'auto' && temYoY)) {
+    comparativo = temYoY ? resumoYoY : cw_resumir_(rows, headerMap, iniAnt, fimAnt);
+    iniComp     = temYoY ? iniYoY : iniAnt;
+    fimComp     = temYoY ? fimYoY : fimAnt;
+    tipoComp    = temYoY ? 'mesmo período do ano passado' : 'período anterior';
+  } else {
+    // 'anterior' ou auto sem dados YoY
+    comparativo = cw_resumir_(rows, headerMap, iniAnt, fimAnt);
+    iniComp     = iniAnt;
+    fimComp     = fimAnt;
+    tipoComp    = 'período anterior';
+  }
+
+  // 4. Tenta puxar produtos e regiões do GA4
+  let topProdutos = [], topRegioes = [];
+  try {
+    const propId = PropertiesService.getScriptProperties().getProperty('GA4_PROPERTY_ID');
+    if (propId && typeof insight_ga4_topItens_ === 'function') {
+      const ymdIni = cw_fmtYMD_(iniAt);
+      const ymdFim = cw_fmtYMD_(fimAt);
+      topProdutos = insight_ga4_topItens_(propId, ymdIni, ymdFim, 3) || [];
+      topRegioes  = insight_ga4_topEstados_(propId, ymdIni, ymdFim, 3) || [];
+    }
+  } catch(e) {
+    Logger.log('GA4 opcional — ignorado: ' + e);
+  }
+
+  // 5. Monta prompt e chama Claude
+  const prompt  = cw_montarPrompt_(atual, comparativo, iniAt, fimAt, iniComp, fimComp, topProdutos, topRegioes, tipoComp);
+  const raw     = cw_chamarClaude_(apiKey, prompt);
+
+  // 6. Formata mensagem final
+  const mensagem = cw_montar_(raw, atual, comparativo, iniAt, fimAt, iniComp, fimComp, topProdutos, topRegioes, tipoComp);
+
+  // 7. Salva e exibe
+  cw_salvar_(mensagem, atual.conta, iniAt, fimAt, modo);
+  cw_dialogo_(mensagem);
+}
+
+// ─── PROMPT PARA O CLAUDE ─────────────────────────────────────────────────────
+
+function cw_montarPrompt_(at, ant, iniAt, fimAt, iniAnt, fimAnt, produtos, regioes, tipoComp) {
+  function fmtDM(d) { return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}`; }
+  function brl(n)   { return 'R$ ' + Number(n||0).toLocaleString('pt-BR', {minimumFractionDigits:2, maximumFractionDigits:2}); }
+  function pct(cur, prev) {
+    if (!prev || prev <= 0) return null;
+    return ((cur - prev) / prev * 100).toFixed(1);
+  }
+
+  const roasAt  = at.investimento > 0 ? (at.receitaPaga / at.investimento).toFixed(1) : 'n/a';
+  const roasAnt = ant.investimento > 0 ? (ant.receitaPaga / ant.investimento).toFixed(1) : 'n/a';
+
+  const varReceita = pct(at.receitaPaga,   ant.receitaPaga);
+  const varSessoes = pct(at.sessoes,        ant.sessoes);
+  const varPedidos = pct(at.pedidosPagos,   ant.pedidosPagos);
+  const varInvest  = pct(at.investimento,   ant.investimento);
+
+  // Melhores dias
+  const melhoresDias = at.dias
+    .filter(d => d.receitaPaga > 0)
+    .sort((a, b) => b.receitaPaga - a.receitaPaga)
+    .slice(0, 3)
+    .map(d => `${fmtDM(d.data)}: ${brl(d.receitaPaga)} — ${d.pedidosPagos} pedidos`)
+    .join('\n');
+
+  // Produtos
+  const listaProdutos = produtos.length
+    ? produtos.map(p => {
+        const variacao = p.variacao ? ` (${p.variacao})` : '';
+        const qtd = p.qtd != null ? ` | ${Math.round(p.qtd)} un` : '';
+        return `${p.nome}${variacao} — ${brl(p.receita)}${qtd}`;
+      }).join('\n')
+    : '(sem dados de produtos neste período)';
+
+  // Regiões
+  const listaRegioes = regioes.length
+    ? regioes.map(r => `${r.nome} — ${brl(r.receita)}`).join('\n')
+    : '(sem dados de região neste período)';
+
+  // Formata variação de forma humana para o prompt
+  // tipoComp define o rótulo: 'mesmo período do ano passado' ou 'período anterior'
+  const labelComp = tipoComp || 'período anterior';
+  function varHumana(cur, prev, nomeBom, nomeMau) {
+    if (prev == null || prev <= 0) return '(sem comparativo)';
+    const p = ((cur - prev) / prev * 100);
+    const abs = Math.abs(p).toFixed(1);
+    if (p >= 5)  return `+${abs}% em relação ao ${labelComp} 📈`;
+    if (p <= -5) return `-${abs}% em relação ao ${labelComp} — mas ${nomeMau}`;
+    return `estável em relação ao ${labelComp}`;
+  }
+
+  return `Você é o assistente de marketing da agência Aprenda e Cresça Assessoria.
+Sua tarefa é escrever uma atualização para o cliente no WhatsApp — humanizada, calorosa e positiva.
+
+CONTEXTO:
+- Agência: Aprenda e Cresça Assessoria
+- Cliente: ${at.conta || 'cliente'}
+- Período atual: ${fmtDM(iniAt)} a ${fmtDM(fimAt)}
+- Comparando com: ${fmtDM(iniAnt)} a ${fmtDM(fimAnt)} (${tipoComp || 'período anterior'})
+
+DADOS COM COMPARATIVO:
+┌─ Vendas confirmadas:   ${brl(at.receitaPaga)}   →  ${varHumana(at.receitaPaga, ant.receitaPaga, 'crescimento sólido', 'o ticket médio está forte')}
+├─ Vendas anteriores:    ${brl(ant.receitaPaga)}
+├─ Pedidos confirmados:  ${at.pedidosPagos}  (anterior: ${ant.pedidosPagos})  →  ${varHumana(at.pedidosPagos, ant.pedidosPagos, 'mais pedidos', 'clientes estão voltando')}
+├─ Taxa de aprovação:    ${at.txAprovacao != null ? (at.txAprovacao * 100).toFixed(0) + '%' : 'n/a'}  (anterior: ${ant.txAprovacao != null ? (ant.txAprovacao * 100).toFixed(0) + '%' : 'n/a'})
+├─ Investimento:         ${brl(at.investimento)}  →  ${varHumana(at.investimento, ant.investimento, 'mais divulgação', 'investimento otimizado')}
+├─ Retorno do investimento: ${roasAt}x  (anterior: ${roasAnt}x)  →  ${varHumana(parseFloat(roasAt), parseFloat(roasAnt || '0'), 'retorno melhorou', 'cada real está sendo bem usado')}
+└─ Visitantes:           ${at.sessoes}  →  ${varHumana(at.sessoes, ant.sessoes, 'mais pessoas na loja', 'público engajado')}
+
+TOP PRODUTOS DESTA SEMANA:
+${listaProdutos}
+
+TOP REGIÕES:
+${listaRegioes}
+
+DIAS MAIS FORTES:
+${melhoresDias || '(sem destaque)'}
+
+─────────────────────────────────────────────
+INSTRUÇÕES DE TOM E ESTILO (siga com atenção):
+
+1. HUMANIZE: Escreva como um parceiro de confiança falando com o dono da loja. Use "a loja", "seus clientes", "semana forte". NUNCA use: ROAS, CTR, conversão, taxa de rejeição, sessões, funil, KPI, métricas, performance.
+
+2. SEMPRE POSITIVO: Independente do resultado, encontre o ângulo positivo. Se as vendas caíram, destaque que a base está crescendo, ou que um produto se destacou, ou que o investimento foi eficiente. Nunca diga que foi ruim, fraco ou abaixo.
+
+3. REESCRITA obrigatória de termos técnicos:
+   - ROAS 10x → "cada real investido gerou R$10 em vendas"
+   - Taxa de aprovação 86% → "86% dos pedidos foram confirmados" ou "quase todos os pedidos foram efetivados"
+   - Sessões / acessos → "pessoas que visitaram a loja"
+   - Variação negativa → "ficamos próximos do ritmo anterior, com espaço para crescer"
+   - Investimento em anúncios → "investimento em divulgação"
+
+4. SENSAÇÃO EMOCIONAL: O cliente deve terminar de ler sentindo que está em boas mãos, que o trabalho é feito com cuidado e que a loja está evoluindo — mesmo que devagar.
+
+5. FORMATO WhatsApp (CRÍTICO):
+   - Use *texto* para negrito (um asterisco), NUNCA **texto** (dois asteriscos) — isso não funciona no WhatsApp
+   - Bullets com • ou emojis, sem hífens
+   - Máximo 10 linhas de conteúdo no corpo
+   - Sem parágrafos longos — frases curtas e diretas
+
+6. PRODUTOS E REGIÕES: Mencione de forma resumida e natural no texto (ex: "o Vestido Ágatha foi destaque") — NÃO liste todos, pois as listas completas já aparecem automaticamente abaixo.
+
+7. NÃO invente dados. Se não tiver informação, pule com naturalidade.
+
+─────────────────────────────────────────────
+ESCREVA APENAS o corpo da mensagem — sem o cabeçalho (📊 Atualização...) e sem o rodapé (Seguimos acompanhando...). Esses serão adicionados automaticamente.
+
+ESTRUTURA OBRIGATÓRIA DO CORPO (nessa ordem):
+
+1. Saudação curta + destaque emocional principal (1 linha)
+
+2. Bullets — TODOS obrigatórios — SEMPRE mostre a variação vs comparativo em cada um:
+• 💰 Vendas: *[valor vendas]* em [N] pedidos — [variação humana vs comparativo, ex: "crescimento de 23% em relação ao mesmo período do ano passado" ou "estável em relação ao período anterior"]
+• 📣 Divulgação: investimos *[valor investido]* em anúncios e cada real trouxe *[retorno]* de volta em vendas
+• 👥 Visitantes: *[número]* pessoas visitaram a loja — [variação humana, ex: "+18% a mais do que no período anterior"]
+• ✅ Confirmação: *[%]%* dos pedidos foram efetivados
+• 📍 Destaque: mencione 1 produto ou região naturalmente
+
+REGRA DO COMPARATIVO: O cliente PRECISA entender se cresceu ou não. O comparativo é com o *${labelComp}*.
+Sempre inclua a comparação em linguagem simples nos bullets de Vendas e Visitantes. Use frases como:
+- "crescimento de X% em relação ao ${labelComp}"
+- "X% acima do ${labelComp}"
+- "no mesmo ritmo do ${labelComp} — base sólida"
+- "um pouco abaixo do ${labelComp}, mas com [ponto positivo]"
+NUNCA troque o rótulo: se o comparativo for 'mesmo período do ano passado', escreva exatamente isso. Se for 'período anterior', escreva 'período anterior'. Nunca omita.
+
+3. Frase calorosa de encerramento (1 linha)
+
+REGRAS FINAIS:
+- O bullet Divulgação SEMPRE mostra valor investido em R$ E o retorno — nunca omita nenhum dos dois
+- Use *texto* para negrito (um asterisco só), NUNCA **texto** com dois asteriscos
+- Máximo 10 linhas no total
+- Só bullets e frases curtas, sem parágrafos
+O texto será colado num grupo de WhatsApp.`;
+}
+
+// ─── MONTAGEM FINAL DA MENSAGEM ───────────────────────────────────────────────
+
+function cw_montar_(corpoIA, at, ant, iniAt, fimAt, iniAnt, fimAnt, produtos, regioes, tipoComp) {
+  function fmtDM(d) { return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}`; }
+  function brl(n)   { return 'R$ ' + Number(n||0).toLocaleString('pt-BR', {minimumFractionDigits:2, maximumFractionDigits:2}); }
+
+  const linhas = [];
+
+  // Cabeçalho fixo (igual ao insights.gs)
+  linhas.push(`📊 Atualização e Feedback - ${at.conta || 'cliente'}`);
+  linhas.push('');
+  const compLabel = tipoComp === 'mesmo período ano anterior' ? '📅 vs mesmo período ano anterior' : '📅 vs período anterior';
+  linhas.push(`📆 ${fmtDM(iniAt)}–${fmtDM(fimAt)}   ${compLabel}: ${fmtDM(iniAnt)}–${fmtDM(fimAnt)}`);
+  linhas.push('');
+
+  // Corpo gerado pelo Claude
+  linhas.push(corpoIA.trim());
+  linhas.push('');
+
+  // Top Regiões (se tiver)
+  if (regioes.length) {
+    linhas.push('Top regiões:');
+    linhas.push('');
+    regioes.slice(0, 3).forEach(r => {
+      const nome = String(r.nome || '').replace(/^State of\s+/i, '').replace(/^Estado de\s+/i, '').trim();
+      linhas.push(`📍 ${nome} — ${brl(r.receita)}`);
+    });
+    linhas.push('');
+  }
+
+  // Top Produtos (se tiver)
+  if (produtos.length) {
+    linhas.push('Top produtos (mais impacto):');
+    linhas.push('');
+    produtos.slice(0, 3).forEach(p => {
+      const variacao = p.variacao ? ` (${p.variacao.replace(/\s*\/\s*/g, '/')})` : '';
+      const qtd = p.qtd != null ? ` | ${Math.round(p.qtd)} un` : '';
+      linhas.push(`🏷️ ${p.nome}${variacao} — ${brl(p.receita)}${qtd}`);
+    });
+    linhas.push('');
+  }
+
+  // Dias fortes
+  const melhores = at.dias
+    .filter(d => d.receitaPaga > 0)
+    .sort((a, b) => b.receitaPaga - a.receitaPaga)
+    .slice(0, 3);
+
+  if (melhores.length) {
+    linhas.push('Dias fortes (vendas confirmadas):');
+    linhas.push('');
+    melhores.forEach(d => {
+      linhas.push(`✅ ${fmtDM(d.data)}: ${brl(d.receitaPaga)} | ${d.pedidosPagos} pedidos`);
+    });
+    linhas.push('');
+  }
+
+  // Rodapé fixo
+  linhas.push('Seguimos de olho em tudo por você! Qualquer novidade a gente avisa na hora. 🤝');
+  linhas.push('Estamos à disposição!');
+
+  return linhas.join('\n');
+}
+
+// ─── LEITURA E RESUMO DO MESTRE ───────────────────────────────────────────────
+
+function cw_lerMestre_(sh) {
+  const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
+  if (lastRow < 2) return { headerMap: {}, rows: [] };
+  const values  = sh.getRange(1, 1, lastRow, lastCol).getValues();
+  // Remove espacos normais e nao-quebravelis nas pontas
+  const headers = values[0].map(h => String(h || '').replace(/[\u00A0\s]+$/, '').replace(/^[\u00A0\s]+/, ''));
+  const headerMap = {};
+  headers.forEach((h, i) => { if (h) headerMap[h] = i; });
+  return { headerMap, rows: values.slice(1) };
+}
+
+function cw_resumir_(rows, headerMap, ini, fim) {
+  function idx(nomes) {
+    const lista = Array.isArray(nomes) ? nomes : [nomes];
+    for (const n of lista) {
+      if (Object.prototype.hasOwnProperty.call(headerMap, n)) return headerMap[n];
+      const norm = n.replace(/[\u00A0]/g, ' ');
+      if (Object.prototype.hasOwnProperty.call(headerMap, norm)) return headerMap[norm];
+    }
+    return -1;
+  }
+
+  const iConta  = idx('Conta ID');
+  const iData   = idx('Data');
+  const iTotal  = idx(['Total (R$)', 'Invest Total (R$)', 'Investimento Total']);
+  const iFb     = idx(['Facebook (R$)', 'Facebook', 'Meta (R$)', 'FB (R$)']);
+  const iGads   = idx(['Google Ads (R$)', 'Google Ads', 'Google (R$)']);
+  const iSess   = idx(['Sessoes GA4', 'Sessões GA4', 'Sessions GA4', 'Sessões']);
+  const iTrans  = idx(['Transacoes GA4', 'Transações GA4', 'Transações']);
+  const iRecP   = idx(['Receita Paga Bagy (R$)', 'Receita Paga LojaVirtual (R$)', 'Receita Paga Bagy', 'Receita Paga LojaVirtual']);
+  const iPedP   = idx(['Pedidos Pagos Bagy', 'Pedidos Pagos LojaVirtual', 'Pedidos Pagos']);
+  const iNaoP   = idx(['Nao Pagos Bagy', 'Não Pagos Bagy', 'Não Pagos LojaVirtual (R$)', 'Não Pagos Bagy (R$)']);
+
+  const iniT = cw_startOfDay_(ini).getTime();
+  const fimT = cw_startOfDay_(fim).getTime();
+
+  let conta = '', invest = 0, sessoes = 0, trans = 0, recPaga = 0, pedidos = 0, naoPagos = 0;
+  const dias = [];
+
+  for (const r of rows) {
+    const d = cw_toDate_(iData >= 0 ? r[iData] : null);
+    if (!d) continue;
+    const t = cw_startOfDay_(d).getTime();
+    if (t < iniT || t > fimT) continue;
+
+    if (!conta && iConta >= 0) conta = String(r[iConta] || '').trim();
+
+    // Investimento: tenta Total primeiro; se vier 0, soma FB + Google diretamente
+    let inv = iTotal >= 0 ? cw_num_(r[iTotal]) : 0;
+    if (inv <= 0) {
+      const fb   = iFb   >= 0 ? cw_num_(r[iFb])   : 0;
+      const gads = iGads >= 0 ? cw_num_(r[iGads]) : 0;
+      inv = fb + gads;
+    }
+    invest += inv;
+
+    sessoes  += cw_num_(iSess  >= 0 ? r[iSess]  : 0);
+    trans    += cw_num_(iTrans >= 0 ? r[iTrans] : 0);
+    const rp  = cw_num_(iRecP  >= 0 ? r[iRecP]  : 0);
+    recPaga  += rp;
+    const pp  = cw_num_(iPedP  >= 0 ? r[iPedP]  : 0);
+    pedidos  += pp;
+    naoPagos += cw_num_(iNaoP  >= 0 ? r[iNaoP]  : 0);
+
+    dias.push({ data: d, receitaPaga: rp, pedidosPagos: pp });
+  }
+
+  const txAprovacao = trans > 0 ? pedidos / trans : null;
+
+  return { conta, investimento: invest, sessoes, pedidosCaptados: trans,
+           receitaPaga: recPaga, pedidosPagos: pedidos, naoPagos,
+           txAprovacao, dias };
+}
+
+/** Diagnostico: rode no menu para checar o mapeamento de colunas */
+function cw_diagnosticar() {
+  const sh = SpreadsheetApp.getActive().getSheetByName('MESTRE');
+  if (!sh) { SpreadsheetApp.getUi().alert('Aba MESTRE nao encontrada.'); return; }
+
+  const { headerMap, rows } = cw_lerMestre_(sh);
+  const hoje = cw_startOfDay_(new Date());
+  const ini  = cw_addDays_(hoje, -7);
+  const iData = headerMap['Data'] !== undefined ? headerMap['Data'] : -1;
+  let linhasNoPeriodo = 0;
+  rows.forEach(r => {
+    const d = cw_toDate_(iData >= 0 ? r[iData] : null);
+    if (d && cw_startOfDay_(d).getTime() >= ini.getTime()) linhasNoPeriodo++;
+  });
+
+  const check = [
+    ['Conta ID',       headerMap['Conta ID']],
+    ['Data',           headerMap['Data']],
+    ['Facebook (R$)',  headerMap['Facebook (R$)']],
+    ['Google Ads (R$)',headerMap['Google Ads (R$)']],
+    ['Total (R$)',     headerMap['Total (R$)']],
+    ['Sessoes GA4',    headerMap['Sessoes GA4'] !== undefined ? headerMap['Sessoes GA4'] : headerMap['Sessões GA4']],
+    ['Receita Paga Bagy (R$)', headerMap['Receita Paga Bagy (R$)']],
+    ['Pedidos Pagos Bagy',     headerMap['Pedidos Pagos Bagy']],
+  ];
+
+  const linhas = check.map(([nome, col]) =>
+    nome + ': ' + (col !== undefined ? 'col ' + (col + 1) + ' OK' : 'NAO ENCONTRADA')
+  );
+  linhas.push('');
+  linhas.push('Linhas nos ultimos 7 dias: ' + linhasNoPeriodo);
+  linhas.push('');
+  linhas.push('Headers (primeiros 25):');
+  linhas.push(Object.keys(headerMap).slice(0, 25).join(' | '));
+
+  SpreadsheetApp.getUi().alert('Diagnostico ClaudeWhatsApp\n\n' + linhas.join('\n'));
+}
+
+// ─── CHAMADA À API DO CLAUDE ──────────────────────────────────────────────────
+
+function cw_chamarClaude_(apiKey, prompt) {
+  const payload = {
+    model:      'claude-sonnet-4-20250514',
+    max_tokens: 1200,
+    messages:   [{ role: 'user', content: prompt }]
+  };
+  const opts = {
+    method:             'post',
+    contentType:        'application/json',
+    headers: {
+      'x-api-key':         apiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    payload:            JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+  const resp = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', opts);
+  if (resp.getResponseCode() !== 200) {
+    throw new Error('Erro Claude API (' + resp.getResponseCode() + '): ' + resp.getContentText());
+  }
+  const json = JSON.parse(resp.getContentText());
+  return (json.content && json.content[0] && json.content[0].text) || '(sem resposta)';
+}
+
+// ─── SALVAR E EXIBIR ──────────────────────────────────────────────────────────
+
+function cw_salvar_(mensagem, conta, ini, fim, modo) {
+  const ss   = SpreadsheetApp.getActive();
+  const nome = 'CW_WHATSAPP_CLIENTE';
+  let sh     = ss.getSheetByName(nome);
+  if (!sh) {
+    sh = ss.insertSheet(nome);
+    sh.getRange('A1').setValue('Mensagens para clientes geradas pelo Claude').setFontWeight('bold');
+    sh.setColumnWidth(1, 200);
+    sh.setColumnWidth(2, 800);
+    sh.setFrozenRows(1);
+  }
+
+  function fmtDM(d) { return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}`; }
+
+  const nextRow = sh.getLastRow() + 2;
+  sh.getRange(nextRow, 1, 1, 4)
+    .setValues([[`${conta} | ${fmtDM(ini)}–${fmtDM(fim)}`, `Modo: ${modo}`, new Date(), '← pronto para copiar']])
+    .setFontWeight('bold')
+    .setBackground('#e8f5e9');
+
+  const msgRow = nextRow + 1;
+  sh.getRange(msgRow, 1, 1, 4).merge();
+  sh.getRange(msgRow, 1).setValue(mensagem).setWrap(true);
+  sh.setRowHeight(msgRow, 380);
+  SpreadsheetApp.flush();
+}
+
+function cw_dialogo_(mensagem) {
+  const safe = String(mensagem || '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+  const html = HtmlService.createHtmlOutput(`
+    <div style="font-family: Arial, sans-serif; padding: 14px;">
+      <div style="font-size: 14px; font-weight: bold; margin-bottom: 8px;">
+        💬 Mensagem pronta para o cliente
+      </div>
+      <textarea id="msg" style="width:100%; height:460px; padding:10px;
+        border:1px solid #ddd; border-radius:8px; font-size:13px;
+        line-height:1.55; resize: none;">${safe}</textarea>
+      <div style="display:flex; gap:10px; margin-top:10px;">
+        <button onclick="document.getElementById('msg').select(); document.execCommand('copy'); this.textContent='✅ Copiado!';"
+          style="padding:8px 18px; background:#25D366; color:#fff;
+          border:none; border-radius:6px; cursor:pointer; font-size:13px; font-weight:bold;">
+          📋 Copiar tudo
+        </button>
+        <span style="font-size:12px; color:#666; align-self:center;">
+          Também salvo na aba <b>CW_WHATSAPP_CLIENTE</b>
+        </span>
+      </div>
+    </div>
+  `).setWidth(640).setHeight(580);
+
+  SpreadsheetApp.getUi().showModelessDialog(html, '💬 Mensagem para o cliente');
+}
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+function cw_num_(v) {
+  if (v === null || v === '' || v === undefined) return 0;
+  if (typeof v === 'number') return isFinite(v) ? v : 0;
+  let s = String(v).trim().replace(/[R$\s\u00A0]/g,'').replace(/\./g,'').replace(',','.');
+  const n = Number(s);
+  return isFinite(n) ? n : 0;
+}
+
+function cw_toDate_(v) {
+  if (v instanceof Date) return v;
+  if (typeof v === 'string') {
+    const m = v.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (m) return new Date(Number(m[3]), Number(m[2])-1, Number(m[1]));
+  }
+  return null;
+}
+
+function cw_startOfDay_(d) {
+  const x = new Date(d); x.setHours(0,0,0,0); return x;
+}
+
+function cw_addDays_(d, n) {
+  const x = new Date(d); x.setDate(x.getDate()+n); return cw_startOfDay_(x);
+}
+
+function cw_parseBR_(s) {
+  const m = String(s||'').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return null;
+  const d = new Date(Number(m[3]), Number(m[2])-1, Number(m[1]));
+  return d.getDate() === Number(m[1]) ? d : null;
+}
+
+function cw_fmtYMD_(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
