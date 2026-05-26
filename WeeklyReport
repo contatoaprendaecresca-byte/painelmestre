@@ -11,7 +11,7 @@
  */
 
 const WEEKLY_CFG = {
-  START_DATE: new Date('2026-01-01T00:00:00'),
+  START_DATE: new Date('2025-01-01T00:00:00'),
   SOURCE_SHEET: 'MESTRE',
   TARGET_SHEET: 'DESEMPENHO_SEMANAL',
   TZ: 'America/Sao_Paulo',
