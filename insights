@@ -71,6 +71,20 @@ function insight_periodoManual(){
   insight_gerarComparativo_(insight_startOfDay_(iniAtual), insight_startOfDay_(fimAtual),
                             insight_startOfDay_(iniAnt), insight_startOfDay_(fimAnt));
 }
+function insight_periodoManual_comComparacao(){
+  const ui = SpreadsheetApp.getUi();
+
+  const p = insight_parsePeriodoPrompt_(ui, 'período atual (manual)');
+  if(!p) return;
+
+  const modo = insight_promptModoComparacao_(ui);
+  if(modo === null) return;
+
+  const comp = insight_calcularComparativo_(ui, p.ini, p.fim, modo);
+  if(!comp) return;
+
+  insight_gerarComparativo_(p.ini, p.fim, comp.iniAnt, comp.fimAnt);
+}
 
 /* -------- GATILHO SEMANAL (SEGUNDA 06:45) -------- */
 function insight_instalarGatilhoSemanal(){
@@ -371,7 +385,6 @@ function insight_resumirPeriodo_(rows, headerMap){
 }
 
  
-
 function insight_montarTextoWhatsApp_(ctx){
 const {
 resumoAtual, resumoAnt,
@@ -477,6 +490,8 @@ linhas.push(``);
 linhas.push(``);
 return linhas.join('\n');
 }
+
+
 
 
 
@@ -591,6 +606,26 @@ function insight_ga4_topEstados_(propertyId, startYmd, endYmd, limit){
     const res2 = insight_ga4_runReport_(propertyId, startYmd, endYmd, ['region'], ['totalRevenue'], limit, 'totalRevenue');
     return insight_ga4_parseTopRegioes_(res2);
   }
+}
+function insight_ultimos3Dias_comComparacao(){ insight_gerarPresetComComparacao_(3); }
+function insight_ultimos7Dias_comComparacao(){ insight_gerarPresetComComparacao_(7); }
+function insight_ultimos14Dias_comComparacao(){ insight_gerarPresetComComparacao_(14); }
+function insight_ultimos30Dias_comComparacao(){ insight_gerarPresetComComparacao_(30); }
+
+function insight_gerarPresetComComparacao_(dias){
+  const ui = SpreadsheetApp.getUi();
+
+  const hoje = insight_startOfDay_(new Date());
+  const fimAtual = insight_addDays_(hoje, -1);                 // ontem
+  const iniAtual = insight_addDays_(fimAtual, -(dias - 1));    // janela atual
+
+  const modo = insight_promptModoComparacao_(ui);
+  if(modo === null) return;
+
+  const comp = insight_calcularComparativo_(ui, iniAtual, fimAtual, modo);
+  if(!comp) return;
+
+  insight_gerarComparativo_(iniAtual, fimAtual, comp.iniAnt, comp.fimAnt);
 }
 
 function insight_ga4_topPaginasProduto_(propertyId, startYmd, endYmd, limit){
@@ -806,4 +841,138 @@ function insight_escapeHtml_(s){
 
 function myFunction() {
   
+}
+function insight_shiftMonthsClamped_(d, deltaMonths){
+  const src = insight_startOfDay_(d);
+  const y = src.getFullYear();
+  const m = src.getMonth();
+  const day = src.getDate();
+
+  // vai pro 1º dia do mês alvo
+  const base = new Date(y, m + deltaMonths, 1);
+  const ty = base.getFullYear();
+  const tm = base.getMonth();
+
+  // limita o dia ao último dia do mês alvo
+  const lastDay = new Date(ty, tm + 1, 0).getDate();
+  const dd = Math.min(day, lastDay);
+
+  return insight_startOfDay_(new Date(ty, tm, dd));
+}
+
+function insight_shiftYearsClamped_(d, deltaYears){
+  const src = insight_startOfDay_(d);
+  const y = src.getFullYear() + deltaYears;
+  const m = src.getMonth();
+  const day = src.getDate();
+
+  const lastDay = new Date(y, m + 1, 0).getDate();
+  const dd = Math.min(day, lastDay);
+
+  return insight_startOfDay_(new Date(y, m, dd));
+}
+
+function insight_promptModoComparacao_(ui){
+  const resp = ui.prompt(
+    'comparativo',
+    [
+      'Escolha o tipo de comparativo (digite 1 a 5):',
+      '',
+      '1) Janela anterior (mesmo tamanho)',
+      '2) Mesmo período do mês anterior',
+      '3) Mês anterior fechado (01..último dia)',
+      '4) Mesmo período do ano anterior',
+      '5) Período manual (você digita as datas)',
+      '',
+      'Ex: 2'
+    ].join('\n'),
+    ui.ButtonSet.OK_CANCEL
+  );
+  if(resp.getSelectedButton() !== ui.Button.OK) return null;
+
+  const n = Number((resp.getResponseText() || '').trim());
+  if(![1,2,3,4,5].includes(n)){
+    ui.alert('opção inválida. Digite 1, 2, 3, 4 ou 5.');
+    return null;
+  }
+  return n;
+}
+
+function insight_parsePeriodoPrompt_(ui, titulo){
+  const resp = ui.prompt(
+    titulo || 'período',
+    'digite no formato: dd/mm/aaaa a dd/mm/aaaa\nexemplo: 12/12/2025 a 18/12/2025',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if(resp.getSelectedButton() !== ui.Button.OK) return null;
+
+  const txt = (resp.getResponseText() || '').trim();
+  const parts = txt.split(/\s+a\s+/i);
+  if(parts.length !== 2){
+    ui.alert('formato inválido. use: dd/mm/aaaa a dd/mm/aaaa');
+    return null;
+  }
+
+  const ini = insight_parseBRDate_(parts[0].trim());
+  const fim = insight_parseBRDate_(parts[1].trim());
+  if(!ini || !fim){
+    ui.alert('datas inválidas. confira dia/mês/ano.');
+    return null;
+  }
+  if(ini > fim){
+    ui.alert('a data inicial não pode ser maior que a final.');
+    return null;
+  }
+
+  return { ini: insight_startOfDay_(ini), fim: insight_startOfDay_(fim) };
+}
+
+function insight_calcularComparativo_(ui, iniAtual, fimAtual, modo){
+  iniAtual = insight_startOfDay_(iniAtual);
+  fimAtual = insight_startOfDay_(fimAtual);
+
+  // 1) Janela anterior (mesmo tamanho)
+  if(modo === 1){
+    const dias = insight_daysDiffInclusive_(iniAtual, fimAtual);
+    const fimAnt = insight_addDays_(iniAtual, -1);
+    const iniAnt = insight_addDays_(fimAnt, -(dias - 1));
+    return { iniAnt, fimAnt };
+  }
+
+  // 2) Mesmo período do mês anterior (shift -1 mês)
+  if(modo === 2){
+    const iniAnt = insight_shiftMonthsClamped_(iniAtual, -1);
+    const fimAnt = insight_shiftMonthsClamped_(fimAtual, -1);
+    return { iniAnt, fimAnt };
+  }
+
+  // 3) Mês anterior fechado (01..último dia)
+  if(modo === 3){
+    // se atravessar meses, avisa (mas calcula baseado no mês de início)
+    if(iniAtual.getFullYear() !== fimAtual.getFullYear() || iniAtual.getMonth() !== fimAtual.getMonth()){
+      ui.alert('Obs: seu período atual cruza mais de um mês.\n"Mês anterior fechado" será calculado com base no mês da data inicial.');
+    }
+
+    const firstThisMonth = new Date(iniAtual.getFullYear(), iniAtual.getMonth(), 1);
+    const lastPrevMonth = insight_addDays_(firstThisMonth, -1); // último dia do mês anterior
+    const iniAnt = insight_startOfDay_(new Date(lastPrevMonth.getFullYear(), lastPrevMonth.getMonth(), 1));
+    const fimAnt = insight_startOfDay_(lastPrevMonth);
+    return { iniAnt, fimAnt };
+  }
+
+  // 4) Mesmo período do ano anterior (shift -1 ano)
+  if(modo === 4){
+    const iniAnt = insight_shiftYearsClamped_(iniAtual, -1);
+    const fimAnt = insight_shiftYearsClamped_(fimAtual, -1);
+    return { iniAnt, fimAnt };
+  }
+
+  // 5) Manual (usuário digita as datas)
+  if(modo === 5){
+    const p = insight_parsePeriodoPrompt_(ui, 'comparativo manual');
+    if(!p) return null;
+    return { iniAnt: p.ini, fimAnt: p.fim };
+  }
+
+  return null;
 }
