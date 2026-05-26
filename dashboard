@@ -1,755 +1,952 @@
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <!-- Força mobile (evita “desktop mode” no iPhone/Safari) -->
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
-  <title>Pop Modas Jeans</title>
+/*
+ * Dashboard.gs — WebApp + Cache (MESTRE -> cache)
+ */
 
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+/* ===================== (OPCIONAL) TOKEN PARA EMBED =====================
+ * 1) Em "Project Settings" > "Script properties":
+ *    - DASH_ACCESS_TOKEN = (uma senha forte)
+ *
+ * 2) Se você NÃO quiser token, deixe a propriedade vazia.
+ */
+const DASH_ACCESS_TOKEN = (PropertiesService.getScriptProperties().getProperty('DASH_ACCESS_TOKEN') || '').trim();
 
-  <style>
-    :root{
-      /* ===== C6-like: dark + laranja (SEM gradientes) ===== */
-      --page:   #07070a;
-      --page2:  #0b0b10;
-      --card:   #101018;
-      --stroke: rgba(255,255,255,.10);
-      --text:   #ffffff;
-      --muted:  rgba(255,255,255,.66);
+/* ===================== CONFIG DASH ===================== */
+const DASH_CFG = {
+  SOURCE_SHEET_NAME: 'MESTRE',
+  HEADER_ROW: 1,
+  DATE_HEADER: 'Data',
 
-      --shadow:  0 18px 40px rgba(0,0,0,.42);
-      --shadow2: 0 10px 22px rgba(0,0,0,.36);
+  COL_CANDIDATES: {
+    // Conta/ID (para chave estável no cache)
+    account: ['Conta ID', 'Account ID', 'Conta', 'Cliente'],
 
-      --r: 14px;
-      --accent:  #ff7a00;
-      --good:    #22c55e;
-      --bad:     #ef4444;
-      --neu:     rgba(255,255,255,.80);
+    // Investimento
+    metaSpend:  ['Facebook (R$)', 'Meta (R$)', 'Valor usado', 'Investimento Meta (R$)'],
+    googleSpend:['Google Ads (R$)', 'Google (R$)', 'Investimento Google (R$)'],
+    totalSpend: ['Total (R$)', 'Investimento', 'Investimento (R$)'],
 
-      /* ===== Mobile tokens ===== */
-      --pad: 8px;
-      --gap: 8px;
-      --tap: 40px;
-      --fs1: 20px;
-      --fs2: 12px;
-      --fs3: 11px;
+    // Atalhos (usados no metaWrite do sync)
+    spend:      ['Total (R$)', 'Investimento', 'Investimento (R$)'],
 
-      /* largura tipo “app” (ajuste se quiser) */
-      --maxw: 680px;
+    // Funil
+    cart:       ['Cart', 'ATC', 'Adições ao carrinho', 'Adds to cart'],
+    checkout:   ['Checkout', 'InitiateCheckout', 'Finalizações de compra'],
+    infoPay:    ['Info. Pagamento', 'Info Pagamento', 'AddPaymentInfo'],
+    purchase:   ['purshase', 'purchase', 'Compras', 'Pedidos Pagos Bagy', 'Transações GA4', 'Pedidos'],
+
+    // GA4
+    sessions:     ['Sessões GA4', 'Sessoes GA4', 'Sessões', 'Sessions'],
+    transactions: ['Transações GA4', 'Transacoes GA4', 'Transactions'],
+
+    // Receita
+    revenuePaid:   ['Receita Paga Bagy (R$)', 'Receita Paga (R$)'],
+    revenueUnpaid: ['Não Pagos Bagy (R$)', 'Nao Pagos Bagy (R$)'],
+    revenueAny:    ['Receita Captada GA4 (R$)', 'Receita Bruta', 'Receita', 'Faturamento'],
+
+    // Atalho (meta)
+    revenue: ['Receita Paga Bagy (R$)', 'Receita Captada GA4 (R$)', 'Receita', 'Faturamento'],
+    purchases: ['purshase', 'purchase', 'Compras', 'Pedidos Pagos Bagy', 'Transações GA4', 'Pedidos']
+  }
+};
+
+/* ===================== CONFIG CACHE ===================== */
+const DASH_CACHE = {
+  ENABLED: true,
+
+  // RAW copy da MESTRE (sem fórmulas) — somente 180 dias até ontem
+  SHEET_DAILY: '_AEC_DASH_CACHE_DAILY',
+  SHEET_META:  '_AEC_DASH_CACHE_META',
+  SHEET_HIST:  '_AEC_DASH_CACHE_HIST',
+
+  WINDOW_DAYS: 180,
+  EXCLUDE_TODAY: true,
+
+  TRIGGER_FN: 'DASH_CACHE_SYNC',
+  TRIGGER_HOUR: 6
+};
+
+/* ===================== WEBAPP (WordPress iFrame) ===================== */
+function doGet(e) {
+  // Token opcional: se configurado, exige ?t=TOKEN
+  if (DASH_ACCESS_TOKEN) {
+    const t = (e && e.parameter && e.parameter.t) ? String(e.parameter.t).trim() : '';
+    if (t !== DASH_ACCESS_TOKEN) {
+      return HtmlService.createHtmlOutput(
+        '<!doctype html><meta charset="utf-8">' +
+        '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+        '<title>Acesso negado</title>' +
+        '<style>body{margin:0;background:#07070a;color:#fff;font-family:system-ui;padding:24px}'+
+        '.card{max-width:560px;margin:0 auto;background:#101018;border:1px solid rgba(255,255,255,.10);border-radius:14px;padding:16px}'+
+        'h1{margin:0 0 8px 0;font-size:16px}p{margin:0;color:rgba(255,255,255,.7)}'+
+        '</style>'+
+        '<div class="card"><h1>Acesso negado</h1><p>Token inválido ou ausente.</p></div>'
+      ).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
     }
+  }
 
-    *{ box-sizing:border-box; }
-    html,body{ height:100%; }
-    body{
-      margin:0;
-      font-family: ui-sans-serif, -apple-system, system-ui, Segoe UI, Roboto, Arial;
-      color: var(--text);
-      color-scheme: dark;
-      background: var(--page);
-    }
+  const tpl = HtmlService.createTemplateFromFile('index');
+  // Injeta token no front (se existir)
+  tpl.APP_TOKEN_FROM_SERVER = DASH_ACCESS_TOKEN || '';
 
-    /* Container (app-like) */
-    .wrap{
-      max-width: var(--maxw);
-      margin: 0 auto;
-      padding: 8px var(--pad) 14px;
-    }
-
-    /* Topbar */
-    ..topbar{
-  position: relative;   /* ou static */
-  top: auto;
-  z-index: auto;
-
-  display:flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 10px;
-  border-radius: var(--r);
-  border: 1px solid var(--stroke);
-  background: rgba(16,16,24,.82);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: var(--shadow);
-  overflow:hidden;
+  return tpl.evaluate()
+    .setTitle('AEC – Relatório por Período')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
+/* Modal interno (opcional) */
+function showDashboard_() {
+  const tpl = HtmlService.createTemplateFromFile('index');
+  tpl.APP_TOKEN_FROM_SERVER = DASH_ACCESS_TOKEN || '';
 
-    .title{ display:flex; flex-direction:column; gap:6px; }
-    .title h1{ margin:0; font-size: 16px; letter-spacing:-.2px; }
-    .title p{ margin:0; color: var(--muted); font-size: 12px; }
+  const html = tpl.evaluate()
+    .setTitle('AEC – Relatório por Período')
+    .setWidth(1100)
+    .setHeight(720)
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 
-    .controls{ display:flex; flex-direction: column; gap: 10px; }
+  SpreadsheetApp.getUi().showModalDialog(html, 'AEC – Relatório por Período');
+}
 
-    .field{ display:flex; flex-direction:column; gap:6px; width: 100%; }
-    .field label{ font-size: 11px; color: var(--muted); }
+/* ===================== ENDPOINTS (front chama por google.script.run) ===================== */
+function getDashboardDefaults() {
+  const cache = _dashGetCacheFull_();
 
-    input[type="date"]{
-      height: var(--tap);
-      border-radius: 14px;
-      border: 1px solid var(--stroke);
-      padding: 0 12px;
-      background: rgba(255,255,255,.06);
-      color: var(--text);
-      outline:none;
+  const today = new Date();
+  const y = new Date(today);
+  y.setDate(y.getDate() - 1);
+  y.setHours(0,0,0,0);
+
+  // Cache FULL: lê só a coluna de Data (rápido)
+  if (cache) {
+    const { sh, headers } = cache;
+    const lastRow = sh.getLastRow();
+    const lastCol = sh.getLastColumn();
+
+    if (lastRow <= 1) {
+      const iso = _toISODate_(y);
+      return { ok:true, minISO:iso, maxISO:iso, startISO:iso, endISO:iso, note:'Cache vazio.' };
     }
 
-    /* Chips (scroll horizontal) */
-    .row{
-      display:flex;
-      gap: 10px;
-      flex-wrap: nowrap;
-      overflow-x: auto;
-      -webkit-overflow-scrolling: touch;
-      padding-bottom: 2px;
-    }
-    .row::-webkit-scrollbar{ display:none; }
-
-    .btn{
-      height: var(--tap);
-      padding: 0 12px;
-      border-radius: 14px;
-      border: 1px solid var(--stroke);
-      background: rgba(255,255,255,.06);
-      color: var(--text);
-      cursor:pointer;
-      user-select:none;
-      font-size: 12px;
-      white-space:nowrap;
-      display:inline-flex;
-      align-items:center;
-      justify-content:center;
-      min-width: 124px;
-      transition: transform .06s ease, filter .15s ease;
-    }
-    .btn:active{ transform: translateY(1px); }
-
-    .btn-primary{
-      border: 0;
-      background: var(--accent);
-      color: #0b0b10;
-      font-weight: 900;
-      width: 100%;
-      min-width: 0;
-      box-shadow: 0 16px 34px rgba(255,122,0,.18);
+    const dateCol = _findColByHeader_(headers, [DASH_CFG.DATE_HEADER]);
+    if (dateCol < 0) {
+      const iso = _toISODate_(y);
+      return { ok:false, error:`CACHE: Coluna "${DASH_CFG.DATE_HEADER}" não encontrada.`, minISO:iso, maxISO:iso, startISO:iso, endISO:iso };
     }
 
-    .switch{
-      display:flex;
-      align-items:center;
-      gap:10px;
-      padding: 10px 12px;
-      border: 1px solid var(--stroke);
-      border-radius: 14px;
-      background: rgba(255,255,255,.06);
-      min-height: var(--tap);
-      font-size: 12px;
-      color: var(--muted);
+    const numRows = lastRow - 1;
+    const dateVals = sh.getRange(2, dateCol + 1, numRows, 1).getValues();
+
+    let minD = null, maxD = null;
+    for (let i = 0; i < dateVals.length; i++) {
+      const d = _parseAnyDate_(dateVals[i][0]);
+      if (!d) continue;
+      if (!minD || d < minD) minD = d;
+      if (!maxD || d > maxD) maxD = d;
     }
 
-    .err{
-      margin-top: 10px;
-      padding: 10px 12px;
-      border-radius: 14px;
-      border: 1px solid rgba(239,68,68,.30);
-      background: rgba(239,68,68,.10);
-      color: rgba(255,255,255,.92);
-      display:none;
+    // garante "até ontem"
+    const end = maxD && maxD < y ? maxD : y;
+    const start = new Date(end); start.setDate(start.getDate() - 29); start.setHours(0,0,0,0);
+
+    return {
+      ok: true,
+      minISO: _toISODate_(minD || start),
+      maxISO: _toISODate_(end),
+      startISO: _toISODate_(start),
+      endISO: _toISODate_(end),
+      note: 'Painel Assessoria'
+    };
+  }
+
+  // fallback: usa MESTRE
+  const sh = _getSourceSheet_();
+  const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
+
+  if (lastRow <= DASH_CFG.HEADER_ROW) {
+    const iso = _toISODate_(y);
+    return { ok:true, minISO:iso, maxISO:iso, startISO:iso, endISO:iso, note:'Aba sem dados.' };
+  }
+
+  const headers = sh.getRange(DASH_CFG.HEADER_ROW, 1, 1, lastCol).getValues()[0];
+  const dateCol = _findColByHeader_(headers, [DASH_CFG.DATE_HEADER]);
+  if (dateCol < 0) {
+    const iso = _toISODate_(y);
+    return { ok:false, error:`Coluna "${DASH_CFG.DATE_HEADER}" não encontrada.`, minISO:iso, maxISO:iso, startISO:iso, endISO:iso };
+  }
+
+  const numRows = lastRow - DASH_CFG.HEADER_ROW;
+  const rowStart = DASH_CFG.HEADER_ROW + 1;
+  const dateVals = sh.getRange(rowStart, dateCol + 1, numRows, 1).getValues();
+
+  let minD = null, maxD = null;
+  for (let i = 0; i < dateVals.length; i++) {
+    const d = _parseAnyDate_(dateVals[i][0]);
+    if (!d) continue;
+    if (!minD || d < minD) minD = d;
+    if (!maxD || d > maxD) maxD = d;
+  }
+
+  const end = maxD && maxD < y ? maxD : y;
+  const start = new Date(end); start.setDate(start.getDate() - 29); start.setHours(0,0,0,0);
+
+  return {
+    ok: true,
+    minISO: _toISODate_(minD || start),
+    maxISO: _toISODate_(end),
+    startISO: _toISODate_(start),
+    endISO: _toISODate_(end),
+    note: ''
+  };
+}
+
+function getReportData(payload) {
+  let start = _isoToDate_(payload.startISO);
+  let end = _isoToDate_(payload.endISO);
+
+  // clamp: nunca passa de ontem
+  const today = new Date();
+  const y = new Date(today);
+  y.setDate(y.getDate() - 1);
+  y.setHours(0,0,0,0);
+
+  if (start > y) start = new Date(y);
+  if (end > y) end = new Date(y);
+
+  start.setHours(0,0,0,0);
+  end.setHours(23,59,59,999);
+
+  const cache = _dashGetCacheFull_();
+  if (cache) {
+    const { sh, headers } = cache;
+    const lastRow = sh.getLastRow();
+    const lastCol = sh.getLastColumn();
+    const numRows = Math.max(0, lastRow - 1);
+    const values = numRows ? sh.getRange(2, 1, numRows, lastCol).getValues() : [];
+
+    const idx = _dashResolveIdx_(headers);
+
+    const current = _dashComputeDaily_(values, idx, start, end);
+
+    let compare = null;
+    if (payload.compare) {
+      const days = _daysInclusive_(start, end);
+      const prevEnd = new Date(start); prevEnd.setDate(prevEnd.getDate() - 1); prevEnd.setHours(23,59,59,999);
+      const prevStart = new Date(prevEnd); prevStart.setDate(prevStart.getDate() - (days - 1)); prevStart.setHours(0,0,0,0);
+
+      compare = _dashComputeDaily_(values, idx, prevStart, prevEnd);
+      compare.range = { startISO: _toISODate_(prevStart), endISO: _toISODate_(prevEnd) };
     }
 
-    /* KPIs: 1 por linha */
-    .grid{
-      display:grid;
-      grid-template-columns: 1fr;
-      gap: var(--gap);
-      margin-top: 14px;
+    return {
+      ok: true,
+      note: 'Dados do CACHE (RAW 180d até ontem).',
+      range: { startISO: _toISODate_(start), endISO: _toISODate_(end) },
+      columnsFound: idx.found,
+      current,
+      compare
+    };
+  }
+
+  return { ok:false, error:'Cache não encontrado. Rode DASH_CACHE_SETUP (ou DASH_CACHE_REBUILD).' };
+}
+
+/* ===================== TOKEN (secured endpoints opcionais) ===================== */
+function _assertDashToken_(token){
+  if (!DASH_ACCESS_TOKEN) return true; // sem token configurado, não bloqueia
+  const t = String(token||'').trim();
+  if (t !== DASH_ACCESS_TOKEN) throw new Error('Token inválido.');
+  return true;
+}
+
+function getDashboardDefaultsSecured(token){
+  _assertDashToken_(token);
+  return getDashboardDefaults();
+}
+
+function getReportDataSecured(payload){
+  _assertDashToken_(payload && payload.token);
+  return getReportData(payload);
+}
+
+/* ===================== CACHE – FUNÇÕES PÚBLICAS ===================== */
+function DASH_CACHE_SETUP() { return _dashCacheSetup_(); }
+function DASH_CACHE_REBUILD() { return _dashCacheRebuildFull_(); }
+function DASH_CACHE_SYNC() { return _dashCacheSync_(); }
+function DASH_CACHE_INSTALL_TRIGGER() { return _dashCacheInstallTrigger_(); }
+function DASH_CACHE_REMOVE_TRIGGER() { return _dashCacheRemoveTrigger_(); }
+function DASH_CACHE_STATUS() { return _dashCacheStatus_(); }
+
+/* ===================== CACHE – CORE ===================== */
+function _dashCacheSetup_(){
+  _dashEnsureCacheSheets_();
+  const r = _dashCacheRebuildFull_();
+  _dashCacheInstallTrigger_();
+  return r;
+}
+
+function _dashEnsureCacheSheets_(){
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  const daily = ss.getSheetByName(DASH_CACHE.SHEET_DAILY) || ss.insertSheet(DASH_CACHE.SHEET_DAILY);
+  const meta  = ss.getSheetByName(DASH_CACHE.SHEET_META)  || ss.insertSheet(DASH_CACHE.SHEET_META);
+  const hist  = ss.getSheetByName(DASH_CACHE.SHEET_HIST)  || ss.insertSheet(DASH_CACHE.SHEET_HIST);
+
+  // META
+  meta.clearContents();
+  meta.getRange(1,1,18,2).setValues([
+    ['last_build',''],
+    ['source_sheet',DASH_CFG.SOURCE_SHEET_NAME],
+    ['window_start',''],
+    ['window_end',''],
+    ['source_last_row',''],
+    ['cache_rows',''],
+    ['date_col',''],
+    ['account_col',''],
+    ['spend_col',''],
+    ['revenue_col',''],
+    ['purchases_col',''],
+    ['note',''],
+    ['header_hash',''],
+    ['inserts',''],
+    ['updates',''],
+    ['deletes',''],
+    ['ms',''],
+    ['mode','RAW_180D_TO_YESTERDAY']
+  ]);
+
+  // HIST
+  if (hist.getLastRow() === 0){
+    hist.getRange(1,1,1,8).setValues([['ts','rows_src_window','rows_cache','ins','upd','del','ms','note']]);
+    hist.setFrozenRows(1);
+  }
+
+  daily.hideSheet(); meta.hideSheet(); hist.hideSheet();
+}
+
+function _dashCacheStatus_(){
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const meta = ss.getSheetByName(DASH_CACHE.SHEET_META);
+  const daily = ss.getSheetByName(DASH_CACHE.SHEET_DAILY);
+  return {
+    ok:true,
+    hasDaily: !!daily,
+    dailyRows: daily ? daily.getLastRow() : 0,
+    meta: meta ? meta.getRange(1,1,18,2).getValues() : null
+  };
+}
+
+function _dashGetCacheFull_(){
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss || !DASH_CACHE || !DASH_CACHE.SHEET_DAILY) return null;
+  const sh = ss.getSheetByName(DASH_CACHE.SHEET_DAILY);
+  if (!sh || sh.getLastRow() < 2) return null;
+
+  const lastCol = sh.getLastColumn();
+  const headers = sh.getRange(1,1,1,lastCol).getValues()[0];
+  return { sh, headers };
+}
+
+function _dashCacheRebuildFull_(){
+  const t0 = Date.now();
+  _dashEnsureCacheSheets_();
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const daily = ss.getSheetByName(DASH_CACHE.SHEET_DAILY);
+  const meta  = ss.getSheetByName(DASH_CACHE.SHEET_META);
+  const hist  = ss.getSheetByName(DASH_CACHE.SHEET_HIST);
+
+  const sh = _getSourceSheet_();
+  const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
+  if (lastRow <= DASH_CFG.HEADER_ROW) return { ok:false, error:'Sem dados na MESTRE.' };
+
+  const headers = sh.getRange(DASH_CFG.HEADER_ROW,1,1,lastCol).getValues()[0];
+  const dateCol = _findColByHeader_(headers, [DASH_CFG.DATE_HEADER]);
+  if (dateCol < 0) throw new Error(`CACHE: Coluna "${DASH_CFG.DATE_HEADER}" não encontrada na MESTRE.`);
+
+  const accCol = _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.account);
+
+  const window = _dashWindow_();
+  const src = _readSourceWindow_(sh, headers, dateCol, window.start, window.end);
+
+  daily.clearContents();
+  daily.getRange(1,1,1,headers.length).setValues([headers]);
+  daily.setFrozenRows(1);
+  if (src.rows.length){
+    daily.getRange(2,1,src.rows.length,headers.length).setValues(src.rows);
+  }
+
+  // ordena por Data + Conta (se existir)
+  try{
+    const sortSpec = [];
+    sortSpec.push({ column: dateCol + 1, ascending: true });
+    if (accCol >= 0) sortSpec.push({ column: accCol + 1, ascending: true });
+    if (src.rows.length) daily.getRange(2,1,src.rows.length,headers.length).sort(sortSpec);
+  }catch(e){}
+
+  daily.hideSheet();
+
+  const ms = Date.now() - t0;
+  const headerHash = _hashText_(headers.map(x=>String(x||'')).join('|'));
+
+  _metaWrite_(meta, {
+    last_build: new Date(),
+    window_start: _toISODate_(window.start),
+    window_end: _toISODate_(window.end),
+    source_last_row: lastRow,
+    cache_rows: src.rows.length,
+    date_col: dateCol>=0 ? headers[dateCol] : '',
+    account_col: accCol>=0 ? headers[accCol] : '',
+    note: 'REBUILD total',
+    header_hash: headerHash,
+    inserts: src.rows.length,
+    updates: 0,
+    deletes: 0,
+    ms
+  });
+
+  hist.appendRow([new Date(), src.rows.length, src.rows.length, src.rows.length, 0, 0, ms, 'REBUILD total']);
+  hist.hideSheet(); meta.hideSheet();
+
+  return { ok:true, mode:'rebuild', rows_src_window:src.rows.length, rows_cache:src.rows.length, ms };
+}
+
+function _dashCacheSync_(){
+  const t0 = Date.now();
+  _dashEnsureCacheSheets_();
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const daily = ss.getSheetByName(DASH_CACHE.SHEET_DAILY);
+  const meta  = ss.getSheetByName(DASH_CACHE.SHEET_META);
+  const hist  = ss.getSheetByName(DASH_CACHE.SHEET_HIST);
+
+  const sh = _getSourceSheet_();
+  const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
+  if (lastRow <= DASH_CFG.HEADER_ROW) return { ok:false, error:'Sem dados na MESTRE.' };
+
+  const srcHeaders = sh.getRange(DASH_CFG.HEADER_ROW,1,1,lastCol).getValues()[0];
+  const dateCol = _findColByHeader_(srcHeaders, [DASH_CFG.DATE_HEADER]);
+  if (dateCol < 0) throw new Error(`CACHE: Coluna "${DASH_CFG.DATE_HEADER}" não encontrada na MESTRE.`);
+
+  const accCol = _findColByHeader_(srcHeaders, DASH_CFG.COL_CANDIDATES.account);
+
+  if (daily.getLastRow() < 2) {
+    const r = _dashCacheRebuildFull_();
+    r.note = 'cache vazio => rebuild';
+    return r;
+  }
+
+  const cacheHeaders = daily.getRange(1,1,1,daily.getLastColumn()).getValues()[0];
+  const srcHash = _hashText_(srcHeaders.map(x=>String(x||'')).join('|'));
+  const cacheHash = _hashText_(cacheHeaders.map(x=>String(x||'')).join('|'));
+
+  if (srcHash !== cacheHash) {
+    const r = _dashCacheRebuildFull_();
+    r.note = 'header mudou => rebuild';
+    return r;
+  }
+
+  const window = _dashWindow_();
+  const src = _readSourceWindow_(sh, srcHeaders, dateCol, window.start, window.end);
+
+  const srcMap = Object.create(null);
+  for (let i=0;i<src.rows.length;i++){
+    const key = _rowKey_(src.rows[i], dateCol, accCol);
+    if (!key) continue;
+    srcMap[key] = src.rows[i];
+  }
+
+  const lr = daily.getLastRow();
+  const lc = daily.getLastColumn();
+  const cacheAll = daily.getRange(1,1,lr,lc).getValues();
+  const rows = cacheAll.slice(1);
+
+  const cacheMap = Object.create(null);
+  for (let i=0;i<rows.length;i++){
+    const rowIndex = i + 2;
+    const key = _rowKey_(rows[i], dateCol, accCol);
+    if (!key) continue;
+    cacheMap[key] = { rowIndex, row: rows[i], hash: _rowHash_(rows[i]) };
+  }
+
+  const toUpdate = [];
+  const toInsert = [];
+  const toDelete = [];
+
+  for (const key in srcMap){
+    const srcRow = srcMap[key];
+    const srcH = _rowHash_(srcRow);
+    const ex = cacheMap[key];
+    if (!ex) toInsert.push(srcRow);
+    else if (ex.hash !== srcH) toUpdate.push({ rowIndex: ex.rowIndex, row: srcRow });
+  }
+
+  for (const key in cacheMap){
+    if (!srcMap[key]) toDelete.push(cacheMap[key].rowIndex);
+  }
+
+  const churn = toInsert.length + toUpdate.length + toDelete.length;
+  if (churn > 1500){
+    const r = _dashCacheRebuildFull_();
+    r.note = `churn alto (${churn}) => rebuild`;
+    return r;
+  }
+
+  toDelete.sort((a,b)=>b-a);
+  for (let i=0;i<toDelete.length;i++) daily.deleteRow(toDelete[i]);
+
+  for (let i=0;i<toUpdate.length;i++){
+    daily.getRange(toUpdate[i].rowIndex, 1, 1, lc).setValues([toUpdate[i].row]);
+  }
+
+  if (toInsert.length){
+    const startRow = daily.getLastRow() + 1;
+    daily.getRange(startRow, 1, toInsert.length, lc).setValues(toInsert);
+  }
+
+  const newLR = daily.getLastRow();
+  const newNum = Math.max(newLR - 1, 0);
+
+  try{
+    const sortSpec = [];
+    sortSpec.push({ column: dateCol + 1, ascending: true });
+    if (accCol >= 0) sortSpec.push({ column: accCol + 1, ascending: true });
+    if (newNum) daily.getRange(2,1,newNum,lc).sort(sortSpec);
+  }catch(e){}
+
+  daily.hideSheet();
+
+  const ms = Date.now() - t0;
+
+  const spendCol = _findColByHeader_(srcHeaders, DASH_CFG.COL_CANDIDATES.spend);
+  const revenueCol = _findColByHeader_(srcHeaders, DASH_CFG.COL_CANDIDATES.revenue);
+  const purchasesCol = _findColByHeader_(srcHeaders, DASH_CFG.COL_CANDIDATES.purchases);
+
+  _metaWrite_(meta, {
+    last_build: new Date(),
+    window_start: _toISODate_(window.start),
+    window_end: _toISODate_(window.end),
+    source_last_row: lastRow,
+    cache_rows: newNum,
+    date_col: dateCol>=0 ? srcHeaders[dateCol] : '',
+    account_col: accCol>=0 ? srcHeaders[accCol] : '',
+    spend_col: spendCol>=0 ? srcHeaders[spendCol] : '',
+    revenue_col: revenueCol>=0 ? srcHeaders[revenueCol] : '',
+    purchases_col: purchasesCol>=0 ? srcHeaders[purchasesCol] : '',
+    note: 'SYNC incremental',
+    header_hash: srcHash,
+    inserts: toInsert.length,
+    updates: toUpdate.length,
+    deletes: toDelete.length,
+    ms
+  });
+
+  hist.appendRow([new Date(), src.rows.length, newNum, toInsert.length, toUpdate.length, toDelete.length, ms, 'SYNC incremental']);
+  hist.hideSheet(); meta.hideSheet();
+
+  return {
+    ok:true,
+    mode:'sync',
+    rows_src_window: src.rows.length,
+    rows_cache: newNum,
+    inserts: toInsert.length,
+    updates: toUpdate.length,
+    deletes: toDelete.length,
+    ms
+  };
+}
+
+function _dashCacheInstallTrigger_(){
+  _dashCacheRemoveTrigger_();
+  ScriptApp.newTrigger(DASH_CACHE.TRIGGER_FN)
+    .timeBased()
+    .everyDays(1)
+    .atHour(DASH_CACHE.TRIGGER_HOUR)
+    .nearMinute(0)
+    .create();
+}
+
+function _dashCacheRemoveTrigger_(){
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction && t.getHandlerFunction() === DASH_CACHE.TRIGGER_FN) {
+      ScriptApp.deleteTrigger(t);
     }
+  });
+}
 
-    .kpi, .panel{
-      background: var(--card);
-      border: 1px solid var(--stroke);
-      border-radius: var(--r);
-      box-shadow: var(--shadow2);
-      overflow:hidden;
+/* ===================== CACHE – WINDOW READ ===================== */
+function _dashWindow_(){
+  const end = DASH_CACHE.EXCLUDE_TODAY ? _yesterday_() : new Date();
+  end.setHours(0,0,0,0);
+  const start = new Date(end);
+  start.setDate(start.getDate() - (DASH_CACHE.WINDOW_DAYS - 1));
+  start.setHours(0,0,0,0);
+  return { start, end };
+}
+
+function _readSourceWindow_(sh, headers, dateCol, winStart, winEnd){
+  const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
+  const rowStart = DASH_CFG.HEADER_ROW + 1;
+  const numRows = lastRow - DASH_CFG.HEADER_ROW;
+  if (numRows <= 0) return { rows: [] };
+
+  const dateVals = sh.getRange(rowStart, dateCol + 1, numRows, 1).getValues();
+  let minAbs = null, maxAbs = null;
+
+  for (let i=0;i<dateVals.length;i++){
+    const d = _parseAnyDate_(dateVals[i][0]);
+    if (!d) continue;
+    if (d < winStart || d > winEnd) continue;
+    const abs = rowStart + i;
+    if (minAbs === null || abs < minAbs) minAbs = abs;
+    if (maxAbs === null || abs > maxAbs) maxAbs = abs;
+  }
+
+  if (minAbs === null) return { rows: [] };
+
+  const block = sh.getRange(minAbs, 1, (maxAbs - minAbs + 1), lastCol).getValues();
+  const rows = [];
+
+  for (let i=0;i<block.length;i++){
+    const d = _parseAnyDate_(block[i][dateCol]);
+    if (!d) continue;
+    if (d < winStart || d > winEnd) continue;
+    rows.push(block[i]);
+  }
+
+  return { rows };
+}
+
+/* ===================== COMPUTE (cache full) ===================== */
+function _dashResolveIdx_(headers){
+  const idx = {
+    date: _findColByHeader_(headers, [DASH_CFG.DATE_HEADER]),
+
+    metaSpend: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.metaSpend),
+    googleSpend: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.googleSpend),
+    totalSpend: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.totalSpend),
+
+    cart: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.cart),
+    checkout: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.checkout),
+    infoPay: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.infoPay),
+    purchase: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.purchase),
+
+    sessions: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.sessions),
+    transactions: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.transactions),
+
+    revenuePaid: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.revenuePaid),
+    revenueUnpaid: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.revenueUnpaid),
+    revenueAny: _findColByHeader_(headers, DASH_CFG.COL_CANDIDATES.revenueAny),
+  };
+
+  idx.found = {
+    date: idx.date >= 0 ? headers[idx.date] : null,
+    spend_total: idx.totalSpend >= 0 ? headers[idx.totalSpend] : null,
+    spend_meta: idx.metaSpend >= 0 ? headers[idx.metaSpend] : null,
+    spend_google: idx.googleSpend >= 0 ? headers[idx.googleSpend] : null,
+    revenue_paid: idx.revenuePaid >= 0 ? headers[idx.revenuePaid] : (idx.revenueAny >= 0 ? headers[idx.revenueAny] : null),
+    revenue_unpaid: idx.revenueUnpaid >= 0 ? headers[idx.revenueUnpaid] : null,
+    cart: idx.cart >= 0 ? headers[idx.cart] : null,
+    checkout: idx.checkout >= 0 ? headers[idx.checkout] : null,
+    infoPay: idx.infoPay >= 0 ? headers[idx.infoPay] : null,
+    purchases: idx.purchase >= 0 ? headers[idx.purchase] : null,
+    sessions: idx.sessions >= 0 ? headers[idx.sessions] : null,
+    transactions: idx.transactions >= 0 ? headers[idx.transactions] : null,
+  };
+
+  if (idx.date < 0) throw new Error(`CACHE FULL: Coluna de data "${DASH_CFG.DATE_HEADER}" não encontrada.`);
+  return idx;
+}
+
+function _dashComputeDaily_(rows, idx, start, end){
+  const daily = Object.create(null);
+
+  let sumSpend = 0, sumMeta = 0, sumGoogle = 0;
+  let sumRevenue = 0, sumUnpaid = 0;
+  let sumPurch = 0, sumCart = 0, sumCheckout = 0, sumInfo = 0;
+  let sumSessions = 0, sumTx = 0;
+
+  let spendWithBuy = 0, spendNoBuy = 0;
+
+  for (let i = 0; i < rows.length; i++){
+    const d = _parseAnyDate_(rows[i][idx.date]);
+    if (!d) continue;
+    if (d < start || d > end) continue;
+
+    const key = _toISODate_(d);
+    if (!daily[key]) daily[key] = {
+      spend:0, meta:0, google:0,
+      revenue:0, unpaid:0,
+      purchases:0, cart:0, checkout:0, infoPay:0,
+      sessions:0, transactions:0
+    };
+
+    const meta = idx.metaSpend >= 0 ? _parseNumber_(rows[i][idx.metaSpend]) : 0;
+    const goog = idx.googleSpend >= 0 ? _parseNumber_(rows[i][idx.googleSpend]) : 0;
+
+    let spend = 0;
+    if (idx.totalSpend >= 0) spend = _parseNumber_(rows[i][idx.totalSpend]);
+    else spend = meta + goog;
+
+    let revenue = 0;
+    if (idx.revenuePaid >= 0) revenue = _parseNumber_(rows[i][idx.revenuePaid]);
+    else if (idx.revenueAny >= 0) revenue = _parseNumber_(rows[i][idx.revenueAny]);
+
+    const unpaid = idx.revenueUnpaid >= 0 ? _parseNumber_(rows[i][idx.revenueUnpaid]) : 0;
+
+    const purch = idx.purchase >= 0 ? _parseNumber_(rows[i][idx.purchase]) : 0;
+    const cart = idx.cart >= 0 ? _parseNumber_(rows[i][idx.cart]) : 0;
+    const checkout = idx.checkout >= 0 ? _parseNumber_(rows[i][idx.checkout]) : 0;
+    const infoPay = idx.infoPay >= 0 ? _parseNumber_(rows[i][idx.infoPay]) : 0;
+
+    const sessions = idx.sessions >= 0 ? _parseNumber_(rows[i][idx.sessions]) : 0;
+    const tx = idx.transactions >= 0 ? _parseNumber_(rows[i][idx.transactions]) : 0;
+
+    daily[key].meta += meta;
+    daily[key].google += goog;
+    daily[key].spend += spend;
+    daily[key].revenue += revenue;
+    daily[key].unpaid += unpaid;
+    daily[key].purchases += purch;
+    daily[key].cart += cart;
+    daily[key].checkout += checkout;
+    daily[key].infoPay += infoPay;
+    daily[key].sessions += sessions;
+    daily[key].transactions += tx;
+
+    sumMeta += meta; sumGoogle += goog; sumSpend += spend;
+    sumRevenue += revenue; sumUnpaid += unpaid;
+    sumPurch += purch; sumCart += cart; sumCheckout += checkout; sumInfo += infoPay;
+    sumSessions += sessions; sumTx += tx;
+  }
+
+  const labels = Object.keys(daily).sort();
+
+  const spendSeries = labels.map(k => _round2_(daily[k].spend));
+  const metaSpendSeries = labels.map(k => _round2_(daily[k].meta));
+  const googleSpendSeries = labels.map(k => _round2_(daily[k].google));
+  const revenueSeries = labels.map(k => _round2_(daily[k].revenue));
+  const unpaidSeries = labels.map(k => _round2_(daily[k].unpaid));
+  const purchasesSeries = labels.map(k => _round2_(daily[k].purchases));
+  const cartSeries = labels.map(k => _round2_(daily[k].cart));
+  const checkoutSeries = labels.map(k => _round2_(daily[k].checkout));
+  const infoPaySeries = labels.map(k => _round2_(daily[k].infoPay));
+  const sessionsSeries = labels.map(k => _round2_(daily[k].sessions));
+  const transactionsSeries = labels.map(k => _round2_(daily[k].transactions));
+
+  for (let i = 0; i < labels.length; i++){
+    const k = labels[i];
+    if (daily[k].purchases > 0) spendWithBuy += daily[k].spend;
+    else spendNoBuy += daily[k].spend;
+  }
+
+  const roas = sumSpend > 0 ? (sumRevenue / sumSpend) : 0;
+  const cpa = sumPurch > 0 ? (sumSpend / sumPurch) : 0;
+  const aov = sumPurch > 0 ? (sumRevenue / sumPurch) : 0;
+  const txConv = sumSessions > 0 ? (sumTx / sumSessions) : 0;
+
+  const metaShare = sumSpend > 0 ? (sumMeta / sumSpend) : 0;
+  const googleShare = sumSpend > 0 ? (sumGoogle / sumSpend) : 0;
+
+  return {
+    kpis: {
+      spend: _round2_(sumSpend),
+      revenue: _round2_(sumRevenue),
+      unpaid: _round2_(sumUnpaid),
+      purchases: _round2_(sumPurch),
+      roas: _round2_(roas),
+
+      spendMeta: _round2_(sumMeta),
+      spendGoogle: _round2_(sumGoogle),
+      metaShare: _round2_(metaShare),
+      googleShare: _round2_(googleShare),
+
+      cpa: _round2_(cpa),
+      aov: _round2_(aov),
+
+      cart: _round2_(sumCart),
+      checkout: _round2_(sumCheckout),
+      infoPay: _round2_(sumInfo),
+
+      sessions: _round2_(sumSessions),
+      transactions: _round2_(sumTx),
+      txConv: _round2_(txConv),
+
+      spendWithBuy: _round2_(spendWithBuy),
+      spendNoBuy: _round2_(spendNoBuy),
+    },
+    series: {
+      labels,
+      spendSeries,
+      revenueSeries,
+      unpaidSeries,
+      purchasesSeries,
+      metaSpendSeries,
+      googleSpendSeries,
+      cartSeries,
+      checkoutSeries,
+      infoPaySeries,
+      sessionsSeries,
+      transactionsSeries
     }
-
-    .kpi{ padding: 12px; }
-    .kpi .label{ font-size: var(--fs2); color: var(--muted); }
-    .kpi .value{ font-size: var(--fs1); font-weight: 900; letter-spacing: -.4px; margin-top: 6px; color: var(--text); }
-
-    .kpi .sub{
-      font-size: var(--fs3);
-      color: var(--muted);
-      margin-top: 8px;
-      line-height: 1.35;
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-    }
-
-    /* Pills (delta) */
-    .delta{
-      display:inline-flex;
-      align-items:center;
-      gap:6px;
-      padding: 4px 10px;
-      border-radius: 999px;
-      border: 1px solid var(--stroke);
-      background: rgba(255,255,255,.05);
-      color: var(--neu);
-      font-weight: 800;
-      font-size: 11px;
-    }
-    .delta.pos{ background: rgba(34,197,94,.14); color: var(--good); border-color: rgba(34,197,94,.28); }
-    .delta.neg{ background: rgba(239,68,68,.14); color: var(--bad); border-color: rgba(239,68,68,.28); }
-
-    /* Panels / Charts */
-    .panel{ padding: 14px; margin-top: 12px; }
-    .panel h2{ margin: 0 0 8px 0; font-size: 14px; color: var(--text); }
-    .small{ font-size: 12px; color: var(--muted); }
-    .note{ margin-top: 8px; font-size: 12px; color: var(--muted); }
-
-    .layout{ display:grid; grid-template-columns: 1fr; gap: 12px; margin-top: 12px; }
-    .charts2{ display:grid; grid-template-columns: 1fr; gap: 12px; margin-top: 12px; }
-
-    .chartBox{ position: relative; height: 240px; width: 100%; }
-    .chartBox.sm{ height: 220px; }
-    .chartBox.xs{ height: 190px; }
-
-    canvas{ width: 100% !important; height: 100% !important; display:block; }
-
-    /* Funil */
-    .funnel{ display:flex; flex-direction:column; gap:10px; padding: 6px 0; }
-    .step{ padding: 12px; border-radius: 16px; border: 1px solid var(--stroke); background: rgba(255,255,255,.04); }
-    .step .t{ display:flex; justify-content:space-between; gap:10px; align-items:baseline; }
-    .step .name{ font-size:12px; color: var(--muted); }
-    .step .val{ font-size:18px; font-weight:900; letter-spacing:-.2px; color: var(--text); }
-    .step .meta{ margin-top: 8px; font-size: 12px; color: var(--muted); line-height:1.25; }
-
-    .pill{ display:inline-flex; align-items:center; gap:8px; padding: 10px 12px; border-radius: 999px; border: 1px solid var(--stroke); background: rgba(255,255,255,.05); font-size: 12px; color: var(--muted); margin-top: 10px; }
-    .dot{ width: 8px; height: 8px; border-radius: 50%; background: var(--accent); display:inline-block; box-shadow: 0 0 0 3px rgba(255,122,0,.18); }
-
-    /* Pequenos ajustes em telas muito pequenas */
-    @media (max-width: 360px){
-      .btn{ min-width: 112px; }
-      .chartBox{ height: 220px; }
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-
-    <div class="topbar">
-      <div class="title">
-        <h1>Pop Modas Jeans</h1>
-        <p id="subtitle">Carregando datas…</p>
-      </div>
-
-      <div class="controls">
-        <div class="field">
-          <label>Data início</label>
-          <input id="start" type="date" />
-        </div>
-        <div class="field">
-          <label>Data fim</label>
-          <input id="end" type="date" />
-        </div>
-
-        <div class="row">
-          <button class="btn" id="btn7">Últimos 7 dias</button>
-          <button class="btn" id="btn30">Últimos 30 dias</button>
-          <button class="btn" id="btnMesAtual">MesAtual (até ontem)</button>
-        </div>
-
-        <label class="switch">
-          <input id="compare" type="checkbox" /> Comparar com período anterior
-        </label>
-
-        <button class="btn btn-primary" id="btnGo">Gerar</button>
-      </div>
-    </div>
-
-    <div class="err" id="err"></div>
-
-    <!-- KPIs (1 por linha) -->
-    <div class="grid">
-      <div class="kpi"><div class="label">Investimento (Total)</div><div class="value" id="kSpend">—</div><div class="sub" id="kSpendSub"></div></div>
-      <div class="kpi"><div class="label">Receita (Paga)</div><div class="value" id="kRevenue">—</div><div class="sub" id="kRevenueSub"></div></div>
-      <div class="kpi"><div class="label">Compras / Pedidos</div><div class="value" id="kPurch">—</div><div class="sub" id="kPurchSub"></div></div>
-      <div class="kpi"><div class="label">ROAS (Receita ÷ Invest.)</div><div class="value" id="kRoas">—</div><div class="sub" id="kRoasSub"></div></div>
-      <div class="kpi"><div class="label">CPA (Invest. ÷ Compras)</div><div class="value" id="kCpa">—</div><div class="sub" id="kCpaSub"></div></div>
-      <div class="kpi"><div class="label">Ticket Médio (Receita ÷ Compras)</div><div class="value" id="kAov">—</div><div class="sub" id="kAovSub"></div></div>
-      <div class="kpi"><div class="label">Mix de Investimento</div><div class="value" id="kMix">—</div><div class="sub" id="kMixSub"></div></div>
-      <div class="kpi"><div class="label">Sessões / Transações</div><div class="value" id="kSessTx">—</div><div class="sub" id="kSessTxSub"></div></div>
-      <div class="kpi"><div class="label">TX Conv (Transações ÷ Sessões)</div><div class="value" id="kTxConv">—</div><div class="sub" id="kTxConvSub"></div></div>
-      <div class="kpi"><div class="label">Receita Não Paga</div><div class="value" id="kUnpaid">—</div><div class="sub" id="kUnpaidSub"></div></div>
-      <div class="kpi"><div class="label">Cart → Checkout</div><div class="value" id="kF1">—</div><div class="sub" id="kF1Sub"></div></div>
-      <div class="kpi"><div class="label">Checkout → Compra</div><div class="value" id="kF2">—</div><div class="sub" id="kF2Sub"></div></div>
-    </div>
-
-    <!-- Linha + Funil -->
-    <div class="layout">
-      <div class="panel">
-        <h2>Diário (Investimento x Receita)</h2>
-        <div class="small" id="colInfo">—</div>
-        <div class="chartBox">
-          <canvas id="chartLine"></canvas>
-        </div>
-        <div class="note" id="note"></div>
-      </div>
-
-      <div class="panel">
-        <h2>Funil do período</h2>
-        <div class="small" id="funnelInfo">Cart → Checkout → Info. Pagamento → Purchase</div>
-
-        <div class="funnel">
-          <div class="step">
-            <div class="t"><div class="name">Cart</div><div class="val" id="fCart">—</div></div>
-            <div class="meta" id="fCartMeta"></div>
-          </div>
-          <div class="step">
-            <div class="t"><div class="name">Checkout</div><div class="val" id="fCheckout">—</div></div>
-            <div class="meta" id="fCheckoutMeta"></div>
-          </div>
-          <div class="step">
-            <div class="t"><div class="name">Info. Pagamento</div><div class="val" id="fInfo">—</div></div>
-            <div class="meta" id="fInfoMeta"></div>
-          </div>
-          <div class="step">
-            <div class="t"><div class="name">Purchase</div><div class="val" id="fPurchase">—</div></div>
-            <div class="meta" id="fPurchaseMeta"></div>
-          </div>
-        </div>
-
-        <div class="pill"><span class="dot"></span><span id="fSummary">—</span></div>
-      </div>
-    </div>
-
-    <!-- Barras + Roscas -->
-    <div class="charts2">
-      <div class="panel">
-        <h2>Investimento por canal (Meta x Google)</h2>
-        <div class="small">Barras empilhadas (diário)</div>
-        <div class="chartBox sm"><canvas id="chartBars"></canvas></div>
-        <div class="note" id="barsNote"></div>
-      </div>
-
-      <div class="panel">
-        <h2>Resumo visual</h2>
-        <div class="small">Roscas (mix e desperdício)</div>
-
-        <div class="charts2" style="margin-top:10px;">
-          <div class="panel" style="margin-top:0; padding:10px;">
-            <div class="small">Mix de investimento</div>
-            <div class="chartBox xs"><canvas id="chartDonutMix"></canvas></div>
-          </div>
-          <div class="panel" style="margin-top:0; padding:10px;">
-            <div class="small">Gasto: com compra vs sem compra</div>
-            <div class="chartBox xs"><canvas id="chartDonutWaste"></canvas></div>
-          </div>
-        </div>
-
-        <div class="note" id="donutNote"></div>
-      </div>
-    </div>
-
-  </div>
-
-  <script>
-    // Token vem do template (DASHBOARD.GS injeta APP_TOKEN)
-    // Se você não quiser token, deixe sempre string vazia no .gs.
-    const APP_TOKEN = (typeof APP_TOKEN_FROM_SERVER !== 'undefined') ? String(APP_TOKEN_FROM_SERVER||'') : '';
-
-    const $ = (id)=>document.getElementById(id);
-    let cLine, cBars, cMix, cWaste;
-
-    function brl(n){ return (Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}); }
-    function num(n){ return (Number(n)||0).toLocaleString('pt-BR'); }
-    function pct(n){ return (Number(n)||0).toLocaleString('pt-BR',{minimumFractionDigits:2, maximumFractionDigits:2}); }
-    function pct100(n){ return (Number(n)||0).toLocaleString('pt-BR',{style:'percent', minimumFractionDigits:1, maximumFractionDigits:1}); }
-
-    function showErr(msg){
-      const box = $('err');
-      box.style.display = msg ? 'block' : 'none';
-      box.textContent = msg || '';
-    }
-
-    function setRange(startISO, endISO){ $('start').value = startISO; $('end').value = endISO; }
-
-    function isoToday(){
-      const d = new Date();
-      const y = d.getFullYear();
-      const m = String(d.getMonth()+1).padStart(2,'0');
-      const day = String(d.getDate()).padStart(2,'0');
-      return `${y}-${m}-${day}`;
-    }
-
-    function addDays(iso, delta){
-      const [y,m,d] = iso.split('-').map(Number);
-      const dt = new Date(y, m-1, d);
-      dt.setDate(dt.getDate() + delta);
-      const yy = dt.getFullYear();
-      const mm = String(dt.getMonth()+1).padStart(2,'0');
-      const dd = String(dt.getDate()).padStart(2,'0');
-      return `${yy}-${mm}-${dd}`;
-    }
-
-    function MesAtualUntilYesterday(){
-      const today = new Date();
-      const y = today.getFullYear();
-      const m = today.getMonth();
-      const start = new Date(y, m, 1);
-      const end = new Date(today);
-      end.setDate(end.getDate()-1);
-      if (end < start) end.setTime(start.getTime());
-
-      const sISO = `${start.getFullYear()}-${String(start.getMonth()+1).padStart(2,'0')}-${String(start.getDate()).padStart(2,'0')}`;
-      const eISO = `${end.getFullYear()}-${String(end.getMonth()+1).padStart(2,'0')}-${String(end.getDate()).padStart(2,'0')}`;
-      return { sISO, eISO };
-    }
-
-    function safeDiv(a,b){ a=Number(a)||0; b=Number(b)||0; return b>0 ? (a/b) : 0; }
-
-    function applyChartTheme(){
-      const css = getComputedStyle(document.documentElement);
-      const text = (css.getPropertyValue('--text')||'#fff').trim();
-      const muted = (css.getPropertyValue('--muted')||'rgba(255,255,255,.66)').trim();
-
-      Chart.defaults.color = text;
-      Chart.defaults.font.family = "ui-sans-serif, -apple-system, system-ui, Segoe UI, Roboto, Arial";
-      Chart.defaults.font.size = 11;
-      Chart.defaults.plugins.legend.labels.color = text;
-      Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(10,10,14,.95)';
-      Chart.defaults.plugins.tooltip.titleColor = '#fff';
-      Chart.defaults.plugins.tooltip.bodyColor = '#fff';
-      Chart.defaults.plugins.tooltip.borderColor = 'rgba(255,122,0,.35)';
-      Chart.defaults.plugins.tooltip.borderWidth = 1;
-
-      // defaults de escalas
-      Chart.defaults.scales = Chart.defaults.scales || {};
-      Chart.defaults.scales.linear = Chart.defaults.scales.linear || {};
-      Chart.defaults.scales.category = Chart.defaults.scales.category || {};
-      Chart.defaults.scales.linear.grid = { color: 'rgba(255,255,255,.10)' };
-      Chart.defaults.scales.category.grid = { color: 'rgba(255,255,255,.10)' };
-      Chart.defaults.scales.linear.ticks = { color: muted };
-      Chart.defaults.scales.category.ticks = { color: muted };
-    }
-
-    function deltaPillHTML(delta, goodWhen='up', fmt='num'){
-      const d = Number(delta);
-      if (!isFinite(d) || d === 0) return `<span class="delta">0</span>`;
-
-      const up = d > 0;
-      const isGood = (goodWhen === 'up') ? up : !up;
-      const cls = isGood ? 'pos' : 'neg';
-      const arrow = up ? '▲' : '▼';
-
-      const abs = Math.abs(d);
-      let v;
-      if (fmt === 'brl') v = brl(abs);
-      else if (fmt === 'pct') v = pct(abs);
-      else if (fmt === 'pct100') v = pct100(abs);
-      else v = num(abs);
-
-      return `<span class="delta ${cls}">${arrow} ${v}</span>`;
-    }
-
-    function setSubDelta(elId, prevValueStr, deltaValue, goodWhen, fmt){
-      const el = document.getElementById(elId);
-      if (!el) return;
-      el.innerHTML = `Anterior: ${prevValueStr} ${deltaPillHTML(deltaValue, goodWhen, fmt)}`;
-    }
-
-    function render(data){
-      showErr('');
-
-      const cur = data.current?.kpis || {};
-      const cmp = data.compare?.kpis || null;
-
-      $('kSpend').textContent = brl(cur.spend);
-      $('kRevenue').textContent = brl(cur.revenue);
-      $('kPurch').textContent = num(cur.purchases);
-      $('kRoas').textContent = pct(cur.roas);
-      $('kCpa').textContent = brl(cur.cpa);
-      $('kAov').textContent = brl(cur.aov);
-      $('kUnpaid').textContent = brl(cur.unpaid);
-
-      $('kMix').textContent = `${pct100(cur.metaShare)} Meta • ${pct100(cur.googleShare)} Google`;
-      $('kMixSub').textContent = `Meta: ${brl(cur.spendMeta)} | Google: ${brl(cur.spendGoogle)}`;
-
-      $('kSessTx').textContent = `${num(cur.sessions)} / ${num(cur.transactions)}`;
-      $('kSessTxSub').textContent = `Sessões GA4 / Transações GA4`;
-
-      $('kTxConv').textContent = pct100(cur.txConv);
-      $('kTxConvSub').textContent = `No período selecionado`;
-
-      const cart = Number(cur.cart)||0;
-      const checkout = Number(cur.checkout)||0;
-      const infoPay = Number(cur.infoPay)||0;
-      const purch = Number(cur.purchases)||0;
-
-      const cartToCheckout = safeDiv(checkout, cart);
-      const checkoutToPurch = safeDiv(purch, checkout);
-
-      $('kF1').textContent = pct100(cartToCheckout);
-      $('kF1Sub').textContent = `Cart→Checkout (${num(checkout)} de ${num(cart)})`;
-      $('kF2').textContent = pct100(checkoutToPurch);
-      $('kF2Sub').textContent = `Checkout→Compra (${num(purch)} de ${num(checkout)})`;
-
-      if (cmp){
-        setSubDelta('kSpendSub', brl(cmp.spend), (cur.spend - cmp.spend), 'down', 'brl');
-        setSubDelta('kRevenueSub', brl(cmp.revenue), (cur.revenue - cmp.revenue), 'up', 'brl');
-        setSubDelta('kPurchSub', num(cmp.purchases), (cur.purchases - cmp.purchases), 'up', 'num');
-        setSubDelta('kRoasSub', pct(cmp.roas), (cur.roas - cmp.roas), 'up', 'pct');
-        setSubDelta('kCpaSub', brl(cmp.cpa), (cur.cpa - cmp.cpa), 'down', 'brl');
-        setSubDelta('kAovSub', brl(cmp.aov), (cur.aov - cmp.aov), 'up', 'brl');
-        setSubDelta('kUnpaidSub', brl(cmp.unpaid), (cur.unpaid - cmp.unpaid), 'down', 'brl');
-        setSubDelta('kTxConvSub', pct100(cmp.txConv), (cur.txConv - cmp.txConv), 'up', 'pct100');
-      }else{
-        $('kSpendSub').textContent = '';
-        $('kRevenueSub').textContent = '';
-        $('kPurchSub').textContent = '';
-        $('kRoasSub').textContent = '';
-        $('kCpaSub').textContent = '';
-        $('kAovSub').textContent = '';
-        $('kUnpaidSub').textContent = '';
-      }
-
-      const c = data.columnsFound || {};
-      $('colInfo').textContent =
-        `Colunas detectadas → Data: ${c.date || '—'} | Total: ${c.spend_total || '—'} | Meta: ${c.spend_meta || '—'} | Google: ${c.spend_google || '—'} | Receita: ${c.revenue_paid || '—'} | Cart: ${c.cart || '—'} | Checkout: ${c.checkout || '—'} | Info: ${c.infoPay || '—'} | Purchase: ${c.purchases || '—'}`;
-
-      const compareNote = data.compare ? ` • Comparando com ${data.compare.range.startISO} a ${data.compare.range.endISO}` : '';
-      const extra = data.note ? ` • ${data.note}` : '';
-      $('note').textContent = `Período atual: ${data.range.startISO} a ${data.range.endISO}${compareNote}${extra}`;
-
-      // Funil
-      $('fCart').textContent = num(cart);
-      $('fCheckout').textContent = num(checkout);
-      $('fInfo').textContent = num(infoPay);
-      $('fPurchase').textContent = num(purch);
-
-      const s1 = safeDiv(checkout, cart);
-      const s2 = safeDiv(infoPay, checkout);
-      const s3 = safeDiv(purch, infoPay);
-
-      $('fCartMeta').textContent = `Base do funil.`;
-      $('fCheckoutMeta').textContent = `Conversão: ${pct100(s1)} (Checkout ÷ Cart)`;
-      $('fInfoMeta').textContent = `Conversão: ${pct100(s2)} (Info ÷ Checkout)`;
-      $('fPurchaseMeta').textContent = `Conversão: ${pct100(s3)} (Purchase ÷ Info)`;
-
-      const overall = safeDiv(purch, cart);
-      $('fSummary').textContent = `Conversão Cart → Purchase: ${pct100(overall)}`;
-
-      // Séries
-      const labels = data.current?.series?.labels || [];
-      const spend = data.current?.series?.spendSeries || [];
-      const revenue = data.current?.series?.revenueSeries || [];
-      const metaSpend = data.current?.series?.metaSpendSeries || [];
-      const googleSpend = data.current?.series?.googleSpendSeries || [];
-
-      applyChartTheme();
-
-      // LINE
-      const ctxL = $('chartLine').getContext('2d');
-      if (cLine) cLine.destroy();
-      cLine = new Chart(ctxL, {
-        type: 'line',
-        data: {
-          labels,
-          datasets: [
-            { label: 'Investimento (Total)', data: spend, borderWidth: 3, tension: .25, borderColor: '#ff7a00' },
-            { label: 'Receita', data: revenue, borderWidth: 3, tension: .25, borderColor: '#22c55e' },
-            ...(data.compare ? [
-              { label: 'Investimento (anterior)', data: data.compare.series?.spendSeries || [], borderWidth: 2, tension: .25, borderDash: [6,4], borderColor: 'rgba(255,122,0,.45)' },
-              { label: 'Receita (anterior)', data: data.compare.series?.revenueSeries || [], borderWidth: 2, tension: .25, borderDash: [6,4], borderColor: 'rgba(34,197,94,.45)' }
-            ] : [])
-          ]
-        },
-        options: {
-          resizeDelay: 150,
-          responsive: true,
-          maintainAspectRatio: false,
-          interaction: { mode: 'index', intersect: false },
-          plugins: { legend: { display: true } },
-          scales: { y: { beginAtZero: true } }
-        }
-      });
-
-      // BARS
-      const ctxB = $('chartBars').getContext('2d');
-      if (cBars) cBars.destroy();
-      cBars = new Chart(ctxB, {
-        type: 'bar',
-        data: {
-          labels,
-          datasets: [
-            { label: 'Meta', data: metaSpend, borderWidth: 1, stack: 's', backgroundColor: 'rgba(255,122,0,.60)' },
-            { label: 'Google', data: googleSpend, borderWidth: 1, stack: 's', backgroundColor: 'rgba(255,255,255,.20)' }
-          ]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          plugins: { legend: { display: true } },
-          scales: {
-            x: { stacked: true },
-            y: { stacked: true, beginAtZero: true }
-          }
-        }
-      });
-
-      $('barsNote').textContent = `Total no período → Meta: ${brl(cur.spendMeta)} • Google: ${brl(cur.spendGoogle)} (Total: ${brl(cur.spend)})`;
-
-      // DONUT MIX
-      const ctxM = $('chartDonutMix').getContext('2d');
-      if (cMix) cMix.destroy();
-      cMix = new Chart(ctxM, {
-        type: 'doughnut',
-        data: {
-          labels: ['Meta', 'Google'],
-          datasets: [{
-            data: [Number(cur.spendMeta)||0, Number(cur.spendGoogle)||0],
-            borderWidth: 1,
-            backgroundColor: ['rgba(255,122,0,.70)','rgba(255,255,255,.22)']
-          }]
-        },
-        options: { responsive: true, maintainAspectRatio: false, cutout: '68%', plugins: { legend: { display: true } } }
-      });
-
-      // DONUT WASTE
-      const ctxW = $('chartDonutWaste').getContext('2d');
-      if (cWaste) cWaste.destroy();
-      cWaste = new Chart(ctxW, {
-        type: 'doughnut',
-        data: {
-          labels: ['Dias com compra', 'Dias sem compra'],
-          datasets: [{
-            data: [Number(cur.spendWithBuy)||0, Number(cur.spendNoBuy)||0],
-            borderWidth: 1,
-            backgroundColor: ['rgba(34,197,94,.70)','rgba(239,68,68,.60)']
-          }]
-        },
-        options: { responsive: true, maintainAspectRatio: false, cutout: '68%', plugins: { legend: { display: true } } }
-      });
-
-      $('donutNote').textContent = `Gasto em dias sem compra: ${brl(cur.spendNoBuy)} • em dias com compra: ${brl(cur.spendWithBuy)}`;
-
-      // --- Auto height para iframe (WordPress) ---
-      postHeightToParent();
-      setTimeout(postHeightToParent, 150);
-      setTimeout(postHeightToParent, 600);
-    }
-
-    // Envia altura para o WordPress (auto-resize opcional)
-    function postHeightToParent(){
-      try{
-        const h = Math.max(
-          document.documentElement.scrollHeight || 0,
-          document.body.scrollHeight || 0
-        );
-        if (window.parent && window.parent !== window){
-          window.parent.postMessage({ type: 'aec_dash_height', height: h }, '*');
-        }
-      }catch(e){}
-    }
-
-    // Observa mudanças de layout e envia altura
-    try{
-      const ro = new ResizeObserver(()=>postHeightToParent());
-      ro.observe(document.body);
-    }catch(e){}
-
-    function fetchDefaults(){
-      const handler = (d)=>{
-        if (!d || !d.ok) {
-          $('subtitle').textContent = 'Não consegui carregar datas.';
-          if (d && d.error) showErr(d.error);
-          return;
-        }
-        $('subtitle').textContent = d.note ? d.note : 'Defina o período e clique em "Gerar".';
-        setRange(d.startISO, d.endISO);
-        postHeightToParent();
-      };
-
-      const fail = (err)=>{
-        $('subtitle').textContent = 'Erro ao carregar.';
-        showErr(String(err && err.message ? err.message : err));
-      };
-
-      // Se token estiver ativo, usa endpoints secured
-      if (APP_TOKEN){
-        google.script.run
-          .withSuccessHandler(handler)
-          .withFailureHandler(fail)
-          .getDashboardDefaultsSecured(APP_TOKEN);
-      } else {
-        google.script.run
-          .withSuccessHandler(handler)
-          .withFailureHandler(fail)
-          .getDashboardDefaults();
-      }
-    }
-
-    function fetchReport(){
-      showErr('');
-
-      const startISO = $('start').value;
-      const endISO = $('end').value;
-      const compare = $('compare').checked;
-
-      if (!startISO || !endISO){ showErr('Selecione Data início e Data fim.'); return; }
-      if (endISO < startISO){ showErr('A Data fim não pode ser menor que a Data início.'); return; }
-
-      $('btnGo').textContent = 'Gerando…';
-
-      const ok = (res)=>{
-        $('btnGo').textContent = 'Gerar';
-        if (!res || !res.ok){ showErr(res && res.error ? res.error : 'Erro desconhecido.'); return; }
-        render(res);
-      };
-
-      const fail = (err)=>{
-        $('btnGo').textContent = 'Gerar';
-        showErr(String(err && err.message ? err.message : err));
-      };
-
-      if (APP_TOKEN){
-        google.script.run
-          .withSuccessHandler(ok)
-          .withFailureHandler(fail)
-          .getReportDataSecured({ startISO, endISO, compare, token: APP_TOKEN });
-      } else {
-        google.script.run
-          .withSuccessHandler(ok)
-          .withFailureHandler(fail)
-          .getReportData({ startISO, endISO, compare });
-      }
-    }
-
-    $('btn7').addEventListener('click', ()=>{
-      const end = $('end').value || isoToday();
-      setRange(addDays(end, -6), end);
-      postHeightToParent();
-    });
-
-    $('btn30').addEventListener('click', ()=>{
-      const end = $('end').value || isoToday();
-      setRange(addDays(end, -29), end);
-      postHeightToParent();
-    });
-
-    $('btnMesAtual').addEventListener('click', ()=>{
-      const { sISO, eISO } = MesAtualUntilYesterday();
-      setRange(sISO, eISO);
-      postHeightToParent();
-    });
-
-    $('btnGo').addEventListener('click', fetchReport);
-
-    fetchDefaults();
-  </script>
-</body>
-</html>
+  };
+}
+
+/* ===================== HELPERS ===================== */
+function _getSourceSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(DASH_CFG.SOURCE_SHEET_NAME);
+  if (!sh) throw new Error(`Aba "${DASH_CFG.SOURCE_SHEET_NAME}" não encontrada.`);
+  return sh;
+}
+
+function _findColByHeader_(headers, candidates) {
+  const h = headers.map(x => String(x || '').trim().toLowerCase());
+  const arr = Array.isArray(candidates) ? candidates : [candidates];
+  for (const c of arr) {
+    const idx = h.indexOf(String(c).trim().toLowerCase());
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
+
+function _yesterday_(){
+  const d = new Date();
+  d.setHours(0,0,0,0);
+  d.setDate(d.getDate()-1);
+  return d;
+}
+
+function _parseAnyDate_(v) {
+  if (!v) return null;
+
+  if (Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v)) {
+    const d = new Date(v);
+    d.setHours(0,0,0,0);
+    return d;
+  }
+
+  let s = String(v).trim();
+  if (!s) return null;
+
+  s = s.split('T')[0].split(' ')[0];
+
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    const dd = Number(m[1]), mm = Number(m[2]) - 1;
+    let yyyy = Number(m[3]); if (yyyy < 100) yyyy += 2000;
+    const d = new Date(yyyy, mm, dd);
+    if (!isNaN(d)) { d.setHours(0,0,0,0); return d; }
+  }
+
+  const m2 = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m2) {
+    const yyyy = Number(m2[1]), mm = Number(m2[2]) - 1, dd = Number(m2[3]);
+    const d = new Date(yyyy, mm, dd);
+    if (!isNaN(d)) { d.setHours(0,0,0,0); return d; }
+  }
+
+  return null;
+}
+
+function _parseNumber_(v) {
+  if (v === null || v === undefined || v === '') return 0;
+  if (typeof v === 'number' && isFinite(v)) return v;
+
+  let s = String(v).replace(/\u00A0/g,' ').trim();
+  if (!s) return 0;
+
+  s = s.replace(/R\$\s?/gi,'').trim();
+
+  const negative = /^\(.*\)$/.test(s);
+  if (negative) s = s.replace(/[()]/g,'');
+
+  if (/^\d{1,3}(\.\d{3})*,\d{1,2}$/.test(s)) s = s.replace(/\./g,'').replace(',','.');
+  else if (/^\d{1,3}(,\d{3})*\.\d{1,2}$/.test(s)) s = s.replace(/,/g,'');
+  else if (s.indexOf(',') >= 0 && s.indexOf('.') === -1) s = s.replace(',','.');
+  else s = s.replace(/[^\d.-]/g,'');
+
+  let n = Number(s);
+  if (!isFinite(n)) n = 0;
+  if (negative) n = -Math.abs(n);
+  return n;
+}
+
+function _isoToDate_(iso) {
+  const [y,m,d] = String(iso).split('-').map(Number);
+  const dt = new Date(y, m-1, d);
+  dt.setHours(0,0,0,0);
+  return dt;
+}
+
+function _toISODate_(d) {
+  const dt = new Date(d);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth()+1).padStart(2,'0');
+  const day = String(dt.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+
+function _daysInclusive_(start, end) {
+  const s = new Date(start); s.setHours(0,0,0,0);
+  const e = new Date(end); e.setHours(0,0,0,0);
+  return Math.round((e - s) / 86400000) + 1;
+}
+
+function _round2_(n) {
+  return Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function _rowKey_(row, dateCol, accCol){
+  const d = _parseAnyDate_(row[dateCol]);
+  if (!d) return null;
+  const iso = _toISODate_(d);
+
+  let acc = '';
+  if (accCol >= 0) acc = String(row[accCol] || '').trim().toUpperCase();
+  return accCol >= 0 ? `${acc}|${iso}` : `__NOACC__|${iso}|${JSON.stringify(row).length}`;
+}
+
+function _rowHash_(row){
+  const parts = row.map(v => {
+    if (Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v)) return `D:${_toISODate_(v)}`;
+    if (typeof v === 'number' && isFinite(v)) return `N:${v}`;
+    return `S:${String(v ?? '')}`;
+  });
+  return _hashText_(parts.join('\u0001'));
+}
+
+function _hashText_(text){
+  const raw = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, text, Utilities.Charset.UTF_8);
+  return Utilities.base64Encode(raw);
+}
+
+function _metaWrite_(metaSheet, o){
+  const range = metaSheet.getRange(1,1,18,2).getValues();
+  const keyToRow = {};
+  for (let i=0;i<range.length;i++) keyToRow[String(range[i][0]||'')] = i+1;
+
+  const set = (k,v)=>{ const r = keyToRow[k]; if (r) metaSheet.getRange(r,2).setValue(v); };
+
+  set('last_build', o.last_build || '');
+  set('source_sheet', DASH_CFG.SOURCE_SHEET_NAME);
+  set('window_start', o.window_start || '');
+  set('window_end', o.window_end || '');
+  set('source_last_row', o.source_last_row || '');
+  set('cache_rows', o.cache_rows || '');
+  set('date_col', o.date_col || '');
+  set('account_col', o.account_col || '');
+  set('spend_col', o.spend_col || '');
+  set('revenue_col', o.revenue_col || '');
+  set('purchases_col', o.purchases_col || '');
+  set('note', o.note || '');
+  set('header_hash', o.header_hash || '');
+  set('inserts', o.inserts || 0);
+  set('updates', o.updates || 0);
+  set('deletes', o.deletes || 0);
+  set('ms', o.ms || 0);
+  set('mode', o.mode || 'RAW_180D_TO_YESTERDAY');
+}
