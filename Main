@@ -83,6 +83,40 @@ function onOpen(e){
 
   root.addSubMenu(mInsight);
 
+  // Adicionar dentro da função onOpen(e), antes de root.addToUi()
+
+const mClaude = ui.createMenu('🤖 Claude AI');
+
+mClaude
+  .addItem('📊 Analisar últimos 7 dias', 'claudeAnalisar7d')
+  .addItem('📊 Analisar últimos 30 dias', 'claudeAnalisar30d')
+  .addItem('📆 Período manual…', 'claudeAnalisarPeriodoManual')
+  .addSeparator()
+  .addItem('⏰ Instalar gatilho semanal (seg 07:15)', 'claudeInstalarGatilhoSemanal')
+  .addItem('🧹 Remover gatilho', 'claudeRemoverGatilhoSemanal');
+
+root.addSubMenu(mClaude);
+
+const mCW = ui.createMenu('💬 WhatsApp Cliente');
+mCW
+  .addItem('📲 7 dias — automático',             'cw_ultimos7Dias')
+  .addItem('📲 7 dias — vs ano anterior',         'cw_ultimos7Dias_YoY')
+  .addItem('📲 7 dias — vs semana anterior',      'cw_ultimos7Dias_anterior')
+  .addSeparator()
+  .addItem('📲 14 dias — automático',             'cw_ultimos14Dias')
+  .addItem('📲 14 dias — vs ano anterior',        'cw_ultimos14Dias_YoY')
+  .addSeparator()
+  .addItem('📲 30 dias — automático',             'cw_ultimos30Dias')
+  .addSeparator()
+  .addItem('📆 Período manual — automático',      'cw_periodoManual')
+  .addItem('📆 Período manual — vs ano anterior', 'cw_periodoManual_YoY')
+  .addItem('📆 Período manual — vs anterior',     'cw_periodoManual_anterior')
+  .addSeparator()
+  .addItem('⏰ Instalar gatilho (seg 07:30)',      'cw_instalarGatilho')
+  .addItem('🧹 Remover gatilho',                   'cw_removerGatilho')
+  .addItem('🔍 Diagnóstico de colunas',            'cw_diagnosticar');
+root.addSubMenu(mCW);
+
   // Bagy (visão)
   const mBagy = ui.createMenu('🛒 Bagy (visão)');
   mBagy
